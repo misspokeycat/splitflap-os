@@ -115,7 +115,52 @@ Learn more: [firmware and protocol documentation](https://github.com/avandeputte
 server/          — Flask web app (backend + frontend)
 apps/            — Plugin library (all installable apps)
 setup/           — Raspberry Pi setup scripts and systemd services
+tests/           — Test suite (see Development below)
 ```
+
+Inside `server/`:
+
+```
+app.py                    — entry point: creates the Flask app, registers blueprints
+splitflap/
+  settings.py             — defaults, settings.json load/save, accessors
+  grid.py                 — grid geometry and text layout
+  state.py                — RuntimeState: the state shared across threads
+  transport.py            — the wire to the display (serial or MQTT gateway)
+  display.py              — rendering text onto the modules
+  animations.py           — module send orders for transitions
+  plugins.py              — the app plugin system
+  playlist.py             — the display loop
+  scheduler.py            — schedules and quiet hours
+  triggers.py             — app-driven interrupts
+  notifications.py        — the /notify queue
+  network.py              — connectivity probing
+  mqtt.py                 — Home Assistant integration
+  startup.py              — boot tasks (auto-home, broker connect)
+  tasks.py                — background loop registration
+  web/                    — HTTP routes, one blueprint per area of the UI
+hardware/                 — Universal Firmware provisioning
+gateway_transport.py      — pyserial-compatible facade over an MQTT gateway
+```
+
+Runtime state lives on the single `RuntimeState` object in `state.py`, which
+the display loop, the scheduler, the trigger loop and the request handlers all
+read and write. Import it as `from splitflap.state import state` and access
+attributes (`state.active_app`); rebinding a `from ... import` name would only
+change your module's copy.
+
+## Development
+
+```bash
+python3 -m venv venv
+venv/bin/pip install -r server/requirements.txt -r requirements-dev.txt
+venv/bin/python -m pytest tests/ -q
+```
+
+Importing `server/app.py` brings the whole server up: it opens the serial port,
+homes the display, starts four background loops and connects to the broker. Set
+`SPLITFLAP_NO_BACKGROUND_TASKS=1` to import it without any of that — the test
+suite does, along with `SPLITFLAP_CONFIG` pointed at a throwaway file.
 
 ## Creating an App
 
