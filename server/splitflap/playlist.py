@@ -8,7 +8,6 @@ waits so the change is picked up immediately rather than at the end of the
 current page.
 """
 
-import random
 import time
 
 from splitflap.animations import get_animation_order

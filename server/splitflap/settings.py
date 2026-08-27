@@ -6,7 +6,6 @@ by name is safe.
 """
 
 import json
-import logging
 import os
 
 

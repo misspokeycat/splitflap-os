@@ -16,67 +16,69 @@ from splitflap.settings import settings
 
 
 # Frozen inventory of the HTTP surface: (rule, endpoint, methods).
-# Moving a route between modules must not change any of these. Adding a route
-# means adding a line here deliberately.
+# The URL and method columns are the contract the web UI depends on and must
+# never change while code moves. Endpoints are blueprint-qualified
+# ("display.index"): that name is internal to Flask, nothing calls url_for,
+# and the UI addresses every one of these by literal URL.
 EXPECTED_ROUTES = [
-    ("/", "index", "GET"),
-    ("/app_library", "app_library", "GET"),
-    ("/app_library/install", "app_library_install", "POST"),
-    ("/app_library/uninstall", "app_library_uninstall", "POST"),
-    ("/app_playlists", "app_playlists", "GET,POST"),
-    ("/app_playlists/<path:name>", "delete_app_playlist", "DELETE"),
-    ("/apply_update", "apply_update", "POST"),
-    ("/assign_id", "assign_id", "POST"),
-    ("/auto_tune", "auto_tune_route", "POST"),
-    ("/backup_settings", "backup_settings", "GET"),
-    ("/check_update", "check_update", "GET"),
-    ("/connection", "connection_config", "GET,POST"),
-    ("/crypto_search", "crypto_search_route", "GET"),
-    ("/current_state", "current_state", "GET"),
-    ("/custom_tune", "custom_tune", "POST"),
-    ("/grid_config", "grid_config", "GET"),
-    ("/home_all", "home_all", "GET"),
-    ("/installed_apps", "installed_apps", "GET"),
-    ("/location_search", "location_search_route", "GET"),
-    ("/location_timezone", "location_timezone_route", "GET"),
-    ("/mqtt_reconnect", "mqtt_reconnect_route", "POST"),
-    ("/network_config", "network_config", "POST"),
-    ("/network_status", "network_status", "GET"),
-    ("/notify", "notify_clear", "DELETE"),
-    ("/notify", "notify_list", "GET"),
-    ("/notify", "notify_push", "POST"),
-    ("/playlists", "playlists", "GET,POST"),
-    ("/playlists/<path:name>", "delete_playlist", "DELETE"),
-    ("/restore_settings", "restore_settings", "POST"),
-    ("/run_app", "run_app", "POST"),
-    ("/run_app_playlist", "run_app_playlist", "POST"),
-    ("/schedule_tick", "schedule_tick_route", "POST"),
-    ("/schedules", "schedules_route", "GET,POST"),
-    ("/serial_port", "set_serial_port", "POST"),
-    ("/serial_ports", "list_serial_ports", "GET"),
-    ("/settings", "handle_settings", "GET,POST"),
-    ("/sports_follow", "sports_follow", "POST"),
-    ("/sports_leagues", "sports_leagues_route", "GET"),
-    ("/sports_teams/<league_key>", "sports_teams_route", "GET"),
-    ("/stocks_search", "stocks_search_route", "GET"),
-    ("/stop_app", "stop_app", "POST"),
-    ("/sync_all", "sync_all", "POST"),
-    ("/sync_module", "sync_module", "POST"),
-    ("/timezones", "timezones_route", "GET"),
-    ("/toggle_autohome", "toggle_autohome", "POST"),
-    ("/toggle_sim", "toggle_sim", "POST"),
-    ("/triggers", "triggers_route", "GET,POST"),
-    ("/tuning_status", "tuning_status", "GET"),
-    ("/universal/deprovision", "universal_deprovision", "POST"),
-    ("/universal/diagnose", "universal_diagnose", "POST"),
-    ("/universal/home", "universal_home", "POST"),
-    ("/universal/provision", "universal_provision", "POST"),
-    ("/universal/scan", "universal_scan", "POST"),
-    ("/universal/status", "universal_status", "GET"),
-    ("/update_playlist", "update_playlist", "POST"),
-    ("/version", "version_route", "GET"),
-    ("/wifi_connect", "wifi_connect", "POST"),
-    ("/wifi_scan", "wifi_scan", "GET"),
+    ("/", "display.index", "GET"),
+    ("/app_library", "apps.app_library", "GET"),
+    ("/app_library/install", "apps.app_library_install", "POST"),
+    ("/app_library/uninstall", "apps.app_library_uninstall", "POST"),
+    ("/app_playlists", "playlists.app_playlists", "GET,POST"),
+    ("/app_playlists/<path:name>", "playlists.delete_app_playlist", "DELETE"),
+    ("/apply_update", "system.apply_update", "POST"),
+    ("/assign_id", "tuning.assign_id", "POST"),
+    ("/auto_tune", "tuning.auto_tune_route", "POST"),
+    ("/backup_settings", "tuning.backup_settings", "GET"),
+    ("/check_update", "system.check_update", "GET"),
+    ("/connection", "hardware.connection_config", "GET,POST"),
+    ("/crypto_search", "search.crypto_search_route", "GET"),
+    ("/current_state", "display.current_state", "GET"),
+    ("/custom_tune", "tuning.custom_tune", "POST"),
+    ("/grid_config", "display.grid_config", "GET"),
+    ("/home_all", "display.home_all", "GET"),
+    ("/installed_apps", "apps.installed_apps", "GET"),
+    ("/location_search", "search.location_search_route", "GET"),
+    ("/location_timezone", "search.location_timezone_route", "GET"),
+    ("/mqtt_reconnect", "network.mqtt_reconnect_route", "POST"),
+    ("/network_config", "network.network_config", "POST"),
+    ("/network_status", "network.network_status", "GET"),
+    ("/notify", "notify.notify_clear", "DELETE"),
+    ("/notify", "notify.notify_list", "GET"),
+    ("/notify", "notify.notify_push", "POST"),
+    ("/playlists", "playlists.playlists", "GET,POST"),
+    ("/playlists/<path:name>", "playlists.delete_playlist", "DELETE"),
+    ("/restore_settings", "tuning.restore_settings", "POST"),
+    ("/run_app", "display.run_app", "POST"),
+    ("/run_app_playlist", "playlists.run_app_playlist", "POST"),
+    ("/schedule_tick", "playlists.schedule_tick_route", "POST"),
+    ("/schedules", "playlists.schedules_route", "GET,POST"),
+    ("/serial_port", "hardware.set_serial_port", "POST"),
+    ("/serial_ports", "hardware.list_serial_ports", "GET"),
+    ("/settings", "tuning.handle_settings", "GET,POST"),
+    ("/sports_follow", "apps.sports_follow", "POST"),
+    ("/sports_leagues", "apps.sports_leagues_route", "GET"),
+    ("/sports_teams/<league_key>", "apps.sports_teams_route", "GET"),
+    ("/stocks_search", "search.stocks_search_route", "GET"),
+    ("/stop_app", "display.stop_app", "POST"),
+    ("/sync_all", "tuning.sync_all", "POST"),
+    ("/sync_module", "tuning.sync_module", "POST"),
+    ("/timezones", "search.timezones_route", "GET"),
+    ("/toggle_autohome", "tuning.toggle_autohome", "POST"),
+    ("/toggle_sim", "display.toggle_sim", "POST"),
+    ("/triggers", "apps.triggers_route", "GET,POST"),
+    ("/tuning_status", "tuning.tuning_status", "GET"),
+    ("/universal/deprovision", "hardware.universal_deprovision", "POST"),
+    ("/universal/diagnose", "hardware.universal_diagnose", "POST"),
+    ("/universal/home", "hardware.universal_home", "POST"),
+    ("/universal/provision", "hardware.universal_provision", "POST"),
+    ("/universal/scan", "hardware.universal_scan", "POST"),
+    ("/universal/status", "hardware.universal_status", "GET"),
+    ("/update_playlist", "display.update_playlist", "POST"),
+    ("/version", "system.version_route", "GET"),
+    ("/wifi_connect", "network.wifi_connect", "POST"),
+    ("/wifi_scan", "network.wifi_scan", "GET"),
 ]
 
 # GET routes that must not be called in a test: /apply_update is POST-only so
@@ -148,6 +150,18 @@ class RouteInventoryTests(unittest.TestCase):
 
     def test_route_count_is_unchanged(self):
         self.assertEqual(len(self.actual()), len(EXPECTED_ROUTES))
+
+    def test_every_route_belongs_to_a_blueprint(self):
+        # app.py registers no routes of its own; it is a composition root.
+        for _, endpoint, _ in self.actual():
+            self.assertIn(".", endpoint, f"{endpoint} is not on a blueprint")
+
+    def test_urls_are_unique_per_method(self):
+        seen = set()
+        for rule, _, methods in self.actual():
+            for method in methods.split(","):
+                self.assertNotIn((rule, method), seen, f"{method} {rule} registered twice")
+                seen.add((rule, method))
 
     def test_no_endpoint_name_is_reused(self):
         endpoints = [ep for _, ep, _ in self.actual()]
