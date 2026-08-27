@@ -15,6 +15,17 @@ import urllib.request
 import shutil
 from datetime import datetime
 from flask import Flask, render_template, request, jsonify
+from splitflap.settings import (
+    CONFIG_PATH,
+    DEFAULT_FLAP_CHARS,
+    get_flap_chars,
+    get_module_char_map,
+    get_module_flap_count,
+    read_config_file,
+    save_settings,
+    settings,
+)
+from splitflap.grid import format_lines, get_cols, get_module_count, get_rows
 from tuning import build_tuning_adjust_commands
 from hardware.universal_firmware import (
     UniversalFirmwareError,
@@ -36,10 +47,6 @@ except ImportError:
 
 SERIAL_PORT_DEFAULT = '/dev/ttyUSB0'
 BAUD_RATE = 9600
-CONFIG_PATH = os.environ.get(
-    "SPLITFLAP_CONFIG",
-    os.path.join(os.path.dirname(__file__), "settings.json")
-)
 APPS_PATH = os.path.join(os.path.dirname(__file__), '..', 'apps')
 VERSION_FILE = os.path.join(os.path.dirname(__file__), '..', 'VERSION')
 
@@ -53,16 +60,6 @@ def _start_background_task(fn):
     if BACKGROUND_TASKS:
         threading.Thread(target=fn, daemon=True).start()
 
-def _read_config_file():
-    """Read the on-disk settings.json (best-effort) before load_settings runs."""
-    if os.path.exists(CONFIG_PATH):
-        try:
-            with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {}
-
 def _get_serial_port(data=None):
     """Resolve serial port: env var > settings.json > default.
 
@@ -73,7 +70,7 @@ def _get_serial_port(data=None):
     if env_port:
         return env_port
     if data is None:
-        data = _read_config_file()
+        data = read_config_file()
     if data.get("serial_port"):
         return data["serial_port"]
     return SERIAL_PORT_DEFAULT
@@ -89,7 +86,7 @@ def _get_connection_type(data=None):
     if env_type:
         return env_type.strip().lower()
     if data is None:
-        data = _read_config_file()
+        data = read_config_file()
     ct = data.get("connection_type", "serial")
     return (ct or "serial").strip().lower()
 
@@ -100,7 +97,7 @@ def _get_gateway_config(data=None):
     settings.json.
     """
     if data is None:
-        data = _read_config_file()
+        data = read_config_file()
     return {
         "broker":   os.environ.get("SPLITFLAP_GATEWAY_BROKER",   data.get("gateway_broker", "")),
         "port":     int(os.environ.get("SPLITFLAP_GATEWAY_PORT", data.get("gateway_port", 1883)) or 1883),
@@ -168,7 +165,7 @@ def _open_connection():
     """
     # Read settings.json once and thread it through the resolvers below so
     # startup doesn't re-open the file for each setting it needs.
-    data = _read_config_file()
+    data = read_config_file()
     if _get_connection_type(data) == "gateway":
         return _open_gateway(_get_gateway_config(data))
     return _open_serial(_get_serial_port(data))
@@ -176,8 +173,6 @@ def _open_connection():
 ser, SERIAL_PORT = _open_connection()
 
 # --- GLOBAL STATE ---
-DEFAULT_FLAP_CHARS = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$&()-+=;q:%'.,/?*roygbpw"
-FLAP_CHARS = DEFAULT_FLAP_CHARS
 current_indices = [-1] * 45  # resized after settings load
 current_display_string = " " * 45
 is_homed = False
@@ -194,136 +189,9 @@ universal_firmware = UniversalFirmwareManager(
 #  SETTINGS
 # ============================================================
 
-def load_settings():
-    # Detect system timezone
-    sys_tz = 'US/Eastern'
-    try:
-        import subprocess
-        result = subprocess.run(['cat', '/etc/timezone'], capture_output=True, text=True, timeout=2)
-        if result.returncode == 0 and result.stdout.strip():
-            sys_tz = result.stdout.strip()
-    except Exception:
-        try:
-            link = os.readlink('/etc/localtime')
-            sys_tz = link.split('zoneinfo/')[-1]
-        except Exception:
-            pass
-    defaults = {
-        "offsets":       {str(i): 2832 for i in range(45)},
-        "calibrations":  {str(i): 4096 for i in range(45)},
-        "tuned_chars":   {str(i): {} for i in range(45)},
-        "zip_code":      "02118",
-        "location_lat":  "",
-        "location_lon":  "",
-        "location_name": "",
-        "timezone":      sys_tz,
-        "weather_api_key": "",
-        "mbta_stop":     "",
-        "mbta_route":    "",
-        "stocks_list":   "",
-        "yt_channel_id": "",
-        "yt_api_key":    "",
-        "yt_video_id":   "",
-        "auto_home":     True,
-        "countdown_event":   "NEW YEAR",
-        "countdown_target":  "2027-01-01T00:00:00",
-        "world_clock_zones": "US/Eastern,US/Pacific,Europe/London",
-        "crypto_list":   "bitcoin,ethereum,solana",
-        "anim_style":    "ltr",
-        "anim_speed":    "0.4",
-        "anim_text":     "SPLIT  FLAP  DISPLAY",
-        "currency_symbol": "$",
-        "saved_playlists": {},
-        "livestream_interval": "25",
-        "livestream_comments": "",
-        "sports_nfl":   "",
-        "sports_nba":   "",
-        "sports_mlb":   "",
-        "sports_nhl":   "",
-        "sports_ncaaf": "",
-        "sports_ncaab": "",
-        "sports_mls":   "",
-        "sports_epl":   "",
-        "sports_laliga":"",
-        "sports_ucl":   "",
-        "sports_wnba":  "",
-        "sports_pga":   "",
-        "sports_ufc":   "",
-        "mqtt_enabled":  False,
-        "mqtt_broker":   "homeassistant.local",
-        "mqtt_port":     1883,
-        "mqtt_user":     "",
-        "mqtt_password": "",
-        "sim_rows": 3,
-        "sim_cols": 15,
-        "app_library_url": "https://raw.githubusercontent.com/csader/splitflap-os/main/apps",
-        "notify_enabled": False,
-        "notify_display_seconds": 10,
-        "notify_sources": {},
-        "transition_style": "ltr",
-        "transition_speed": 15,
-        "schedules": [],
-        "quiet_hours_enabled": False,
-        "quiet_hours_start": "22:00",
-        "quiet_hours_end": "07:00",
-        "quiet_hours_days": ["sun","mon","tue","wed","thu","fri","sat"],
-        "serial_port": "",
-        "connection_type": "serial",
-        "gateway_broker":   "",
-        "gateway_port":     1883,
-        "gateway_prefix":   "splitflap",
-        "gateway_user":     "",
-        "gateway_password": "",
-        "char_map": DEFAULT_FLAP_CHARS,
-        "module_configs": {},
-        "triggers_enabled": True,
-        "triggers": [],
-        "installed_apps": [
-            "time", "date", "weather", "stocks", "sports", "countdown",
-            "world_clock", "crypto", "iss", "metro", "youtube", "yt_comments",
-            "dashboard", "demo", "livestream",
-            "anim_rainbow", "anim_sweep", "anim_twinkle", "anim_checker", "anim_matrix",
-            "anim_random_spin",
-            "word-clock", "moon-phase", "star-wars-quotes",
-        ],
-    }
-    if os.path.exists(CONFIG_PATH):
-        try:
-            with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                defaults.update(data)
-                if "tuned_chars" not in defaults:
-                    defaults["tuned_chars"] = {str(i): {} for i in range(45)}
-                return defaults
-        except:
-            pass
-    return defaults
-
-def save_settings(data):
-    with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=4)
-
-settings = load_settings()
-FLAP_CHARS = settings.get("char_map", DEFAULT_FLAP_CHARS)
-
-
-def get_module_char_map(mod_id):
-    cfg = settings.get("module_configs", {}).get(str(mod_id), {})
-    return cfg.get("char_map", FLAP_CHARS)
-
-
-def get_module_flap_count(mod_id):
-    cfg = settings.get("module_configs", {}).get(str(mod_id), {})
-    return cfg.get("flap_count", len(get_module_char_map(mod_id)))
-
-
 # ============================================================
 #  GRID HELPERS
 # ============================================================
-
-def get_rows(): return int(settings.get('sim_rows', 3))
-def get_cols(): return int(settings.get('sim_cols', 15))
-def get_module_count(): return get_rows() * get_cols()
 
 def resize_grid():
     global current_indices, current_display_string
@@ -1128,7 +996,7 @@ def send_to_display_sync(text):
     clean_text = unicodedata.normalize('NFC', text.upper())
     for emoji, char in COLOR_MAP.items():
         clean_text = clean_text.replace(emoji, char)
-    if '"' not in FLAP_CHARS:
+    if '"' not in get_flap_chars():
         clean_text = clean_text.replace('"', 'q')
     n = get_module_count()
     clean_text = clean_text.ljust(n)[:n]
@@ -1177,7 +1045,7 @@ def send_to_display_slot(text, effect_speed=80):
     clean_text = unicodedata.normalize('NFC', text.upper())
     for emoji, char in COLOR_MAP.items():
         clean_text = clean_text.replace(emoji, char)
-    if '"' not in FLAP_CHARS:
+    if '"' not in get_flap_chars():
         clean_text = clean_text.replace('"', 'q')
     n = get_module_count()
     clean_text = clean_text.ljust(n)[:n]
@@ -1269,7 +1137,7 @@ def send_to_display(text, order=None, raw=False, step_delay_ms=15):
         clean_text = clean_text.replace(currency.upper(), '$')
     # The physical " flap is addressed as 'q' in the default firmware character map.
     # Only apply this substitution if " is not in the active char map.
-    if '"' not in FLAP_CHARS:
+    if '"' not in get_flap_chars():
         clean_text = clean_text.replace('"', 'q')
     n = get_module_count()
     clean_text = clean_text.ljust(n)[:n]
@@ -1311,13 +1179,6 @@ def send_to_display(text, order=None, raw=False, step_delay_ms=15):
 # ============================================================
 #  APP DATA FETCHERS
 # ============================================================
-
-def format_lines(*lines, cols=None):
-    cols = cols or get_cols()
-    rows = get_rows()
-    padded = list(lines) + [''] * (rows - len(lines))
-    return ''.join(l.center(cols)[:cols] for l in padded[:rows])
-
 
 # ============================================================
 #  PLUGIN SYSTEM
@@ -2175,7 +2036,7 @@ def toggle_sim():
 
 @app.route('/settings', methods=['GET', 'POST'])
 def handle_settings():
-    global settings, is_homed, current_indices, current_display_string, FLAP_CHARS
+    global is_homed, current_indices, current_display_string
     if request.method == 'POST':
         data   = request.json
         action = data.get('action')
@@ -2190,8 +2051,6 @@ def handle_settings():
             for k, v in data.items():
                 if k not in protected:
                     settings[k] = v
-            if 'char_map' in data:
-                FLAP_CHARS = settings['char_map']
             if 'sim_rows' in data or 'sim_cols' in data:
                 resize_grid()
                 mqtt_publish_discovery()
@@ -2253,10 +2112,10 @@ def custom_tune():
         step = int(data.get('step', 0))
         idx  = int(data.get('index', 0))
         send_raw(f"m{mod_id:02d}g{step}")
-        if 0 <= idx < len(FLAP_CHARS):
+        if 0 <= idx < len(get_flap_chars()):
             current_indices[mod_id] = idx
             sl = list(current_display_string.ljust(get_module_count()))
-            sl[mod_id] = FLAP_CHARS[idx]
+            sl[mod_id] = get_flap_chars()[idx]
             current_display_string = "".join(sl)
 
     elif action == 'save':
@@ -2299,7 +2158,6 @@ def assign_id():
 
 @app.route('/toggle_autohome', methods=['POST'])
 def toggle_autohome():
-    global settings
     enabled = request.json.get('enabled', True)
     settings['auto_home'] = enabled
     save_settings(settings)
@@ -2393,7 +2251,8 @@ def auto_tune_route():
                 chars.append(char_map[0])
         text = ''.join(chars)
         send_to_display(text, raw=True)
-        return jsonify(status="ok", char=FLAP_CHARS[char_idx] if char_idx < len(FLAP_CHARS) else ' ', index=char_idx)
+        flap_chars = get_flap_chars()
+        return jsonify(status="ok", char=flap_chars[char_idx] if char_idx < len(flap_chars) else ' ', index=char_idx)
 
     elif action == 'adjust':
         modules   = data.get('modules', [])
@@ -2470,7 +2329,7 @@ def auto_tune_route():
 @app.route('/tuning_status')
 def tuning_status():
     char_idx = int(request.args.get('char_index', 0))
-    if char_idx < 0 or char_idx >= len(FLAP_CHARS):
+    if char_idx < 0 or char_idx >= len(get_flap_chars()):
         return jsonify(status="error", message="Invalid char_index"), 400
     positions = {}
     for i in range(get_module_count()):
@@ -2486,8 +2345,8 @@ def tuning_status():
         }
     return jsonify(
         char_index=char_idx,
-        char=FLAP_CHARS[char_idx],
-        flap_chars=FLAP_CHARS,
+        char=get_flap_chars()[char_idx],
+        flap_chars=get_flap_chars(),
         grid={'rows': get_rows(), 'cols': get_cols(), 'total': get_module_count()},
         positions=positions,
     )

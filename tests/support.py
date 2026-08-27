@@ -7,6 +7,7 @@ a throwaway file, so tests can never touch a real display, a real broker or
 the developer's own settings.json.
 """
 
+import copy
 import os
 import pathlib
 import sys
@@ -78,7 +79,7 @@ class SplitflapTestCase(unittest.TestCase):
     """
 
     STATE = (
-        "settings", "mqtt_client", "mqtt_last_text", "is_homed", "sim_mode",
+        "mqtt_client", "mqtt_last_text", "is_homed", "sim_mode",
         "current_indices", "current_display_string", "current_playlist",
         "last_sent_page", "active_app", "active_app_playlist",
         "app_playlist_name", "app_playlist_loop", "loop_delay", "send_raw",
@@ -87,7 +88,10 @@ class SplitflapTestCase(unittest.TestCase):
 
     def setUp(self):
         self._saved = {name: getattr(app, name) for name in self.STATE}
-        app.settings = dict(app.settings)
+        # settings is one dict shared by every module, so it has to be
+        # snapshotted and restored in place — rebinding app.settings would
+        # leave splitflap.grid and friends reading the original.
+        self._saved_settings = copy.deepcopy(app.settings)
         self.client = FakeMqttClient()
         app.mqtt_client = self.client
         self.sent = []
@@ -96,6 +100,8 @@ class SplitflapTestCase(unittest.TestCase):
     def tearDown(self):
         for name, value in self._saved.items():
             setattr(app, name, value)
+        app.settings.clear()
+        app.settings.update(self._saved_settings)
         app.stop_event.clear()
         app.resize_grid()
 
