@@ -1,96 +1,11 @@
-import json
-import os
-import pathlib
-import sys
-import tempfile
+"""Regression tests for the Home Assistant MQTT integration."""
+
 import unittest
 
-
-SERVER_DIR = pathlib.Path(__file__).resolve().parents[1] / "server"
-sys.path.insert(0, str(SERVER_DIR))
-
-# server.app must be imported with no hardware, no broker and no background
-# loops attached, and with settings isolated from the developer's own
-# settings.json — otherwise these tests would home real modules and publish
-# retained discovery payloads to a real Home Assistant.
-os.environ["SPLITFLAP_NO_BACKGROUND_TASKS"] = "1"
-os.environ.setdefault(
-    "SPLITFLAP_CONFIG",
-    os.path.join(tempfile.mkdtemp(prefix="splitflap-test-"), "settings.json"),
-)
-
-import app  # noqa: E402
-
-SOURCE = (SERVER_DIR / "app.py").read_text(encoding="utf-8")
+from support import SOURCE, FakeMessage, FakeMqttClient, SplitflapTestCase, app
 
 
-class FakeMqttClient:
-    """Stands in for paho's client; records what would go on the wire."""
-
-    def __init__(self, connected=True):
-        self._connected = connected
-        self.published = []
-        self.subscribed = []
-
-    def is_connected(self):
-        return self._connected
-
-    def publish(self, topic, payload=None, qos=0, retain=False):
-        self.published.append((topic, payload, retain))
-
-    def subscribe(self, topic, qos=0):
-        self.subscribed.append(topic)
-
-    def topics(self):
-        return [t for t, _, _ in self.published]
-
-    def last(self, topic):
-        for t, payload, _ in reversed(self.published):
-            if t == topic:
-                return payload
-        raise AssertionError(f"nothing was published to {topic}")
-
-    def last_json(self, topic):
-        return json.loads(self.last(topic))
-
-
-class FakeMessage:
-    def __init__(self, topic, payload):
-        self.topic = topic
-        self.payload = payload.encode("utf-8")
-
-
-class MqttTestCase(unittest.TestCase):
-    """Snapshots the module globals these tests mutate."""
-
-    STATE = (
-        "settings", "mqtt_client", "mqtt_last_text", "is_homed",
-        "current_indices", "current_display_string", "current_playlist",
-        "last_sent_page", "active_app", "active_app_playlist",
-        "app_playlist_name", "send_raw",
-    )
-
-    def setUp(self):
-        self._saved = {name: getattr(app, name) for name in self.STATE}
-        app.settings = dict(app.settings)
-        self.client = FakeMqttClient()
-        app.mqtt_client = self.client
-        self.sent = []
-        app.send_raw = self.sent.append
-
-    def tearDown(self):
-        for name, value in self._saved.items():
-            setattr(app, name, value)
-        app.stop_event.clear()
-        app.resize_grid()
-
-    def set_grid(self, rows, cols):
-        app.settings["sim_rows"] = rows
-        app.settings["sim_cols"] = cols
-        app.resize_grid()
-
-
-class TextCapacityTests(MqttTestCase):
+class TextCapacityTests(SplitflapTestCase):
     """The text entity used to advertise max=45 — the module count, with no
     room for the '|' separators its own name tells you to use."""
 
@@ -137,7 +52,7 @@ class TextCapacityTests(MqttTestCase):
         )
 
 
-class TextLayoutTests(MqttTestCase):
+class TextLayoutTests(SplitflapTestCase):
     """'|' is a line break in both centre modes. With Center Text off the
     payload used to be passed through raw, so '|' reached the display as a
     literal flap character and the lines were never laid out."""
@@ -190,7 +105,7 @@ class TextLayoutTests(MqttTestCase):
         self.assertEqual(len(app.current_playlist[0]), app.get_module_count())
 
 
-class StatePublishTests(MqttTestCase):
+class StatePublishTests(SplitflapTestCase):
     """splitflap/text/state was declared and advertised in discovery but
     nothing ever published to it, so the entity sat permanently unknown."""
 
@@ -214,7 +129,7 @@ class StatePublishTests(MqttTestCase):
         self.assertEqual(app.mqtt_client.published, [])
 
 
-class HomeButtonTests(MqttTestCase):
+class HomeButtonTests(SplitflapTestCase):
     """The home handler assigned is_homed / current_indices /
     current_display_string without a `global` declaration, so the writes
     landed on function locals and were thrown away."""
@@ -249,7 +164,7 @@ class HomeButtonTests(MqttTestCase):
         self.assertIsNone(app.active_app_playlist)
 
 
-class AutoHomeOnBootTests(MqttTestCase):
+class AutoHomeOnBootTests(SplitflapTestCase):
     """auto_home was only ever read by /toggle_autohome; nothing consulted it
     at startup, so 'Auto-Home on Boot' did nothing."""
 
@@ -288,7 +203,7 @@ class AutoHomeOnBootTests(MqttTestCase):
         self.assertIn("_start_background_task(_startup_auto_home)", SOURCE)
 
 
-class ConnectSequenceTests(MqttTestCase):
+class ConnectSequenceTests(SplitflapTestCase):
     def test_connect_callback_publishes_availability_discovery_and_state(self):
         app._mqtt_on_connect(self.client, None, {}, 0)
         topics = self.client.topics()
