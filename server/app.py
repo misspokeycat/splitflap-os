@@ -43,6 +43,16 @@ CONFIG_PATH = os.environ.get(
 APPS_PATH = os.path.join(os.path.dirname(__file__), '..', 'apps')
 VERSION_FILE = os.path.join(os.path.dirname(__file__), '..', 'VERSION')
 
+# Importing this module normally starts the display, schedule, trigger and
+# network loops, homes the hardware and connects to the broker. Tests (and
+# any tooling that just wants to inspect the module) set this to skip them.
+BACKGROUND_TASKS = os.environ.get("SPLITFLAP_NO_BACKGROUND_TASKS") != "1"
+
+
+def _start_background_task(fn):
+    if BACKGROUND_TASKS:
+        threading.Thread(target=fn, daemon=True).start()
+
 def _read_config_file():
     """Read the on-disk settings.json (best-effort) before load_settings runs."""
     if os.path.exists(CONFIG_PATH):
@@ -373,6 +383,7 @@ MQTT_DEVICE = {
 }
 
 mqtt_client = None
+mqtt_last_text = ""
 
 
 def _get_mqtt_app_options():
@@ -385,11 +396,35 @@ def _get_mqtt_playlist_options():
     return ["off"] + sorted(settings.get('saved_app_playlists', {}).keys())
 
 
+def _mqtt_text_max():
+    """Longest payload the text entity can accept.
+
+    One character per module, plus the '|' separators that sit between
+    lines (rows - 1 of them). Home Assistant caps text entities at 255.
+    """
+    return min(255, get_module_count() + max(0, get_rows() - 1))
+
+
+def _mqtt_format_text(payload):
+    """Lay a '|'-delimited payload out across the grid.
+
+    Honours the Center Text switch: centred when on, left-aligned when off.
+    Extra lines beyond the grid height are dropped.
+    """
+    lines = payload.split('|')[:get_rows()]
+    if settings.get('mqtt_center', True):
+        return format_lines(*lines)
+    cols, rows = get_cols(), get_rows()
+    padded = lines + [''] * (rows - len(lines))
+    return ''.join(l.ljust(cols)[:cols] for l in padded[:rows])
+
+
 def mqtt_publish_state():
     """Publish current display state and active mode to MQTT."""
     if not mqtt_client or not mqtt_client.is_connected():
         return
     mqtt_client.publish(MQTT_STATUS_STATE, current_display_string, retain=True)
+    mqtt_client.publish(MQTT_TEXT_STATE, mqtt_last_text, retain=True)
     mqtt_client.publish(MQTT_MODE_STATE, active_app or "off", retain=True)
     center_state = "ON" if settings.get('mqtt_center', True) else "OFF"
     mqtt_client.publish(MQTT_CENTER_STATE, center_state, retain=True)
@@ -409,7 +444,7 @@ def mqtt_publish_discovery():
             "command_topic": MQTT_TEXT_CMD,
             "state_topic": MQTT_TEXT_STATE,
             "min": 0,
-            "max": 45,
+            "max": _mqtt_text_max(),
             "mode": "text",
             "availability": avail,
             "device": MQTT_DEVICE,
@@ -519,6 +554,7 @@ def _mqtt_on_connect(client, userdata, flags, rc, properties=None):
 def _mqtt_on_message(client, userdata, msg):
     global active_app, current_playlist, last_sent_page, loop_delay
     global active_app_playlist, app_playlist_loop, app_playlist_name
+    global is_homed, current_indices, current_display_string, mqtt_last_text
     payload = msg.payload.decode('utf-8', errors='ignore').strip()
 
     if msg.topic == "homeassistant/status" and payload == "online":
@@ -529,11 +565,8 @@ def _mqtt_on_message(client, userdata, msg):
     if msg.topic == MQTT_TEXT_CMD:
         active_app = None
         active_app_playlist = None
-        if settings.get('mqtt_center', True):
-            lines = payload.split('|')
-            current_playlist = [format_lines(*lines)]
-        else:
-            current_playlist = [payload]
+        mqtt_last_text = payload
+        current_playlist = [_mqtt_format_text(payload)]
         last_sent_page = None
         stop_event.set()
         mqtt_publish_state()
@@ -580,6 +613,8 @@ def _mqtt_on_message(client, userdata, msg):
 
     elif msg.topic == f"{MQTT_TOPIC_PREFIX}/home/set":
         send_raw("m**h")
+        active_app = None
+        active_app_playlist = None
         is_homed = True
         current_indices = [0] * get_module_count()
         current_display_string = " " * get_module_count()
@@ -589,7 +624,7 @@ def _mqtt_on_message(client, userdata, msg):
 def mqtt_setup():
     """Initialize MQTT client and connect to broker. Fails gracefully."""
     global mqtt_client
-    if not mqtt or not settings.get('mqtt_enabled', True):
+    if not mqtt or not settings.get('mqtt_enabled', False):
         logging.info("MQTT disabled or paho-mqtt not installed")
         return
     try:
@@ -622,9 +657,6 @@ def mqtt_reconnect():
             pass
         mqtt_client = None
     mqtt_setup()
-
-
-mqtt_setup()
 
 
 # ============================================================
@@ -1878,8 +1910,8 @@ def _schedule_loop():
         _schedule_tick()
 
 
-threading.Thread(target=_schedule_loop, daemon=True).start()
-threading.Thread(target=_schedule_tick, daemon=True).start()
+_start_background_task(_schedule_loop)
+_start_background_task(_schedule_tick)
 
 def playlist_loop():
     global current_playlist, loop_delay, last_sent_page, active_app
@@ -1991,7 +2023,47 @@ def playlist_loop():
             stop_event.clear()
 
 
-threading.Thread(target=playlist_loop, daemon=True).start()
+_start_background_task(playlist_loop)
+
+
+# ============================================================
+#  STARTUP TASKS
+# ============================================================
+
+def apply_auto_home_on_boot():
+    """Honour the Auto-Home on Boot setting.
+
+    Re-asserts the firmware flag either way — it lives in module RAM and is
+    lost on power cycle — then homes when enabled. Returns whether it homed.
+    """
+    global is_homed, current_indices, current_display_string
+    enabled = bool(settings.get('auto_home', True))
+    send_raw(f"m**a{1 if enabled else 0}")
+    if not enabled:
+        return False
+    send_raw("m**h")
+    is_homed = True
+    current_indices = [0] * get_module_count()
+    current_display_string = " " * get_module_count()
+    mqtt_publish_state()
+    logging.info("Auto-home on boot: homed all modules")
+    return True
+
+
+def _startup_auto_home():
+    time.sleep(3)  # let the controller finish booting before we talk to it
+    try:
+        apply_auto_home_on_boot()
+    except Exception as e:
+        logging.error(f"Auto-home on boot failed: {e}")
+
+
+_start_background_task(_startup_auto_home)
+
+# Connected here (not at import time) so the plugin registry and playlist
+# globals that the discovery/state publishers read already exist.
+if BACKGROUND_TASKS:
+    mqtt_setup()
 
 
 # ============================================================
@@ -2070,7 +2142,7 @@ def _trigger_loop():
         _check_triggers()
 
 
-threading.Thread(target=_trigger_loop, daemon=True).start()
+_start_background_task(_trigger_loop)
 
 
 # ============================================================
@@ -2122,6 +2194,7 @@ def handle_settings():
                 FLAP_CHARS = settings['char_map']
             if 'sim_rows' in data or 'sim_cols' in data:
                 resize_grid()
+                mqtt_publish_discovery()
             save_settings(settings)
             return jsonify(status="Saved")
 
@@ -2913,7 +2986,7 @@ def _mqtt_publish_network():
 
 
 # Initial check on startup
-threading.Thread(target=_check_network, daemon=True).start()
+_start_background_task(_check_network)
 
 # Periodic connectivity check every 60s
 def _periodic_network_check():
@@ -2921,7 +2994,7 @@ def _periodic_network_check():
         time.sleep(60)
         _check_network()
 
-threading.Thread(target=_periodic_network_check, daemon=True).start()
+_start_background_task(_periodic_network_check)
 
 
 @app.route('/mqtt_reconnect', methods=['POST'])

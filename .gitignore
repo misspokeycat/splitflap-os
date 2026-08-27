@@ -3,3 +3,6 @@ __pycache__/
 .DS_Store
 settings.json
 CLAUDE.md
+venv/
+.venv/
+.pytest_cache/
