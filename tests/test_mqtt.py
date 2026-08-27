@@ -207,7 +207,7 @@ class AutoHomeOnBootTests(SplitflapTestCase):
     def test_auto_home_is_registered_as_a_startup_task(self):
         # Source-level guard: the reported bug was that no startup task
         # consulted the setting at all.
-        self.assertIn("_start_background_task(_startup_auto_home)", SOURCE)
+        self.assertIn("start_background_task(_startup_auto_home)", SOURCE)
 
 
 class ConnectSequenceTests(SplitflapTestCase):
@@ -221,21 +221,20 @@ class ConnectSequenceTests(SplitflapTestCase):
         self.assertIn(app.MQTT_TEXT_CMD, self.client.subscribed)
         self.assertIn(f"{app.MQTT_TOPIC_PREFIX}/home/set", self.client.subscribed)
 
-    def test_broker_connects_after_the_state_it_publishes_is_defined(self):
+    def test_discovery_lists_the_installed_apps(self):
         # mqtt_setup() used to run at import time, above the plugin registry
         # and the playlist globals. A fast broker could fire on_connect before
-        # they existed, and the resulting NameError killed the whole discovery
-        # publish, so no entities appeared in Home Assistant at all.
+        # they existed; the NameError killed the whole discovery publish and
+        # no entities appeared in Home Assistant at all.
         #
-        # The playlist half is now structurally safe: that state lives on
-        # splitflap.state, imported at the top of app.py. The plugin registry
-        # is still module-level, so it still needs guarding.
-        connect_at = SOURCE.index("if BACKGROUND_TASKS:\n    mqtt_setup()")
-        for definition in ("\n_plugin_registry = {}", "\nload_installed_plugins()"):
-            self.assertLess(
-                SOURCE.index(definition), connect_at,
-                f"mqtt_setup() runs before {definition.strip()}",
-            )
+        # Both halves are now structurally safe — that state lives in
+        # splitflap.state and splitflap.plugins, which Python fully executes
+        # before app.py continues. What is worth asserting is the symptom:
+        # a connect that publishes a real app list, not an empty one.
+        app._mqtt_on_connect(self.client, None, {}, 0)
+        config = self.client.last_json("homeassistant/select/splitflap_app/config")
+        self.assertIn("time", config["options"])
+        self.assertGreater(len(config["options"]), 1)
 
     def test_discovery_options_read_the_populated_plugin_registry(self):
         # The failure mode this guards: discovery publishing an empty app list.

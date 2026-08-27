@@ -15,6 +15,11 @@ CONFIG_PATH = os.environ.get(
     os.path.join(os.path.dirname(os.path.dirname(__file__)), "settings.json"),
 )
 
+APPS_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "apps")
+VERSION_FILE = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "VERSION")
+
 DEFAULT_FLAP_CHARS = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$&()-+=;q:%\'.,/?*roygbpw"
 
 
@@ -154,3 +159,11 @@ def get_module_char_map(mod_id):
 def get_module_flap_count(mod_id):
     cfg = settings.get("module_configs", {}).get(str(mod_id), {})
     return cfg.get("flap_count", len(get_module_char_map(mod_id)))
+
+
+def read_version():
+    try:
+        with open(VERSION_FILE, 'r') as f:
+            return f.read().strip()
+    except Exception:
+        return 'unknown'

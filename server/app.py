@@ -16,16 +16,44 @@ import shutil
 from datetime import datetime
 from flask import Flask, render_template, request, jsonify
 from splitflap.settings import (
+    APPS_PATH,
     CONFIG_PATH,
     DEFAULT_FLAP_CHARS,
     get_flap_chars,
     get_module_char_map,
     get_module_flap_count,
     read_config_file,
+    read_version,
     save_settings,
     settings,
 )
 from splitflap.state import resize_grid, state
+from splitflap.tasks import BACKGROUND_TASKS, start_background_task
+from splitflap.transport import (
+    BAUD_RATE,
+    SERIAL_PORT_DEFAULT,
+    get_connection_type,
+    get_gateway_config,
+    get_serial_port,
+    open_gateway,
+    open_serial,
+    send_raw,
+    serial_lock,
+    sync_hardware_data,
+    sync_module_config,
+    universal_firmware,
+)
+from splitflap.plugins import (
+    _plugin_caches,
+    _plugin_data,
+    _plugin_modules,
+    _plugin_registry,
+    _plugin_triggers,
+    get_plugin_app_list,
+    get_plugin_pages,
+    get_plugin_settings_config,
+    load_installed_plugins,
+)
 from splitflap.animations import get_animation_order
 from splitflap.sports import SPORTS_LEAGUES
 from splitflap.grid import format_lines, get_cols, get_module_count, get_rows
@@ -41,147 +69,8 @@ except ImportError:
     mqtt = None
     logging.warning("paho-mqtt not installed — MQTT integration disabled")
 
-try:
-    from gateway_transport import GatewayTransport, GatewayConnectionError
-except ImportError:
-    GatewayTransport = None
-    class GatewayConnectionError(Exception):
-        pass
-
-SERIAL_PORT_DEFAULT = '/dev/ttyUSB0'
-BAUD_RATE = 9600
-APPS_PATH = os.path.join(os.path.dirname(__file__), '..', 'apps')
-VERSION_FILE = os.path.join(os.path.dirname(__file__), '..', 'VERSION')
-
-# Importing this module normally starts the display, schedule, trigger and
-# network loops, homes the hardware and connects to the broker. Tests (and
-# any tooling that just wants to inspect the module) set this to skip them.
-BACKGROUND_TASKS = os.environ.get("SPLITFLAP_NO_BACKGROUND_TASKS") != "1"
-
-
-def _start_background_task(fn):
-    if BACKGROUND_TASKS:
-        threading.Thread(target=fn, daemon=True).start()
-
-def _get_serial_port(data=None):
-    """Resolve serial port: env var > settings.json > default.
-
-    Pass an already-loaded settings dict as ``data`` to avoid re-reading
-    settings.json (see _open_connection).
-    """
-    env_port = os.environ.get("SPLITFLAP_SERIAL_PORT")
-    if env_port:
-        return env_port
-    if data is None:
-        data = read_config_file()
-    if data.get("serial_port"):
-        return data["serial_port"]
-    return SERIAL_PORT_DEFAULT
-
-def _get_connection_type(data=None):
-    """Resolve the active connection type: env var > settings.json > 'serial'.
-
-    Returns either 'serial' (local USB/serial port) or 'gateway' (MQTT
-    SplitFlap Gateway). Pass an already-loaded settings dict as ``data`` to
-    avoid re-reading settings.json.
-    """
-    env_type = os.environ.get("SPLITFLAP_CONNECTION_TYPE")
-    if env_type:
-        return env_type.strip().lower()
-    if data is None:
-        data = read_config_file()
-    ct = data.get("connection_type", "serial")
-    return (ct or "serial").strip().lower()
-
-def _get_gateway_config(data=None):
-    """Pull the gateway MQTT settings from env/settings.json.
-
-    Pass an already-loaded settings dict as ``data`` to avoid re-reading
-    settings.json.
-    """
-    if data is None:
-        data = read_config_file()
-    return {
-        "broker":   os.environ.get("SPLITFLAP_GATEWAY_BROKER",   data.get("gateway_broker", "")),
-        "port":     int(os.environ.get("SPLITFLAP_GATEWAY_PORT", data.get("gateway_port", 1883)) or 1883),
-        "prefix":   os.environ.get("SPLITFLAP_GATEWAY_PREFIX",   data.get("gateway_prefix", "splitflap")),
-        "user":     os.environ.get("SPLITFLAP_GATEWAY_USER",     data.get("gateway_user", "")),
-        "password": os.environ.get("SPLITFLAP_GATEWAY_PASSWORD", data.get("gateway_password", "")),
-    }
-
-def _read_version():
-    try:
-        with open(VERSION_FILE, 'r') as f:
-            return f.read().strip()
-    except Exception:
-        return 'unknown'
 
 app = Flask(__name__)
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
-
-serial_lock = threading.Lock()
-
-def _open_serial(port=None):
-    """Open a serial connection. Returns (Serial, port) or (None, port)."""
-    port = port or _get_serial_port()
-    try:
-        s = serial.Serial(port, BAUD_RATE, timeout=0.5)
-        logging.info(f"Serial connected: {port}")
-        return s, port
-    except Exception as e:
-        logging.error(f"Serial failed on {port}. Simulation Mode. Reason: {e}")
-        return None, port
-
-def _open_gateway(cfg=None):
-    """Open an MQTT gateway connection. Returns (GatewayTransport, label) or (None, label)."""
-    cfg = cfg or _get_gateway_config()
-    label = f"gateway:{cfg.get('broker','')}:{cfg.get('port',1883)}"
-    if GatewayTransport is None:
-        logging.error("Gateway selected but paho-mqtt/gateway_transport unavailable. Simulation Mode.")
-        return None, label
-    if not cfg.get("broker"):
-        logging.error("Gateway selected but no broker configured. Simulation Mode.")
-        return None, label
-    try:
-        t = GatewayTransport(
-            broker=cfg["broker"],
-            port=cfg.get("port", 1883),
-            prefix=cfg.get("prefix", "splitflap"),
-            username=cfg.get("user", ""),
-            password=cfg.get("password", ""),
-        )
-        logging.info(f"Gateway connected: {label} prefix={cfg.get('prefix','splitflap')}")
-        return t, label
-    except GatewayConnectionError as e:
-        logging.error(f"Gateway failed ({label}). Simulation Mode. Reason: {e}")
-        return None, label
-    except Exception as e:
-        logging.error(f"Gateway error ({label}). Simulation Mode. Reason: {e}")
-        return None, label
-
-def _open_connection():
-    """Open the active connection based on the configured connection type.
-
-    Returns (transport_or_None, descriptor_string). The transport exposes a
-    pyserial-compatible surface in both modes, so all downstream code is
-    agnostic to which one is active.
-    """
-    # Read settings.json once and thread it through the resolvers below so
-    # startup doesn't re-open the file for each setting it needs.
-    data = read_config_file()
-    if _get_connection_type(data) == "gateway":
-        return _open_gateway(_get_gateway_config(data))
-    return _open_serial(_get_serial_port(data))
-
-state.ser, state.serial_port = _open_connection()
-state.sim_mode = not state.ser
-
-universal_firmware = UniversalFirmwareManager(
-    get_serial=lambda: state.ser,
-    serial_lock=serial_lock,
-    get_sim_mode=lambda: state.sim_mode,
-)
-
 
 # ============================================================
 #  SETTINGS
@@ -484,106 +373,6 @@ def mqtt_reconnect():
     mqtt_setup()
 
 
-# ============================================================
-#  SERIAL HELPERS
-# ============================================================
-
-def send_raw(cmd):
-    if not cmd.endswith('\n'):
-        cmd += '\n'
-    with serial_lock:
-        if state.ser and not state.sim_mode:
-            state.ser.write(cmd.encode())
-            state.ser.flush()
-            time.sleep(0.02)
-
-def sync_hardware_data(mod_id):
-    if not state.ser:
-        return False
-    with serial_lock:
-        state.ser.reset_input_buffer()
-        state.ser.write(f"m{mod_id:02d}d\n".encode())
-        state.ser.flush()
-        start = time.time()
-        buffer = ""
-        target = f"m{mod_id:02d}d:"
-        while time.time() - start < 5.0:
-            if state.ser.in_waiting > 0:
-                try:
-                    chunk = state.ser.read(state.ser.in_waiting).decode('utf-8', errors='ignore')
-                    buffer += chunk
-                    if target in buffer and '\n' in buffer[buffer.find(target):]:
-                        valid_part = buffer[buffer.find(target):].split('\n')[0]
-                        data = valid_part.split('d:', 1)[1]
-                        parts = data.split(':')
-                        if len(parts) >= 2:
-                            settings['offsets'][str(mod_id)] = int(parts[0])
-                            settings['calibrations'][str(mod_id)] = int(parts[1])
-                            settings['tuned_chars'][str(mod_id)] = {}
-                            if len(parts) == 3 and parts[2]:
-                                for p in parts[2].split(','):
-                                    if '=' in p:
-                                        idx, val = p.split('=')
-                                        settings['tuned_chars'][str(mod_id)][idx] = int(val)
-                            save_settings(settings)
-                            return True
-                except Exception as e:
-                    logging.error(f"Parse error: {e}")
-            time.sleep(0.05)
-    return False
-
-
-def sync_module_config(mod_id):
-    """Query module's A command for flap count and character map (Universal Firmware v31+)."""
-    if not state.ser:
-        return False
-    with serial_lock:
-        state.ser.reset_input_buffer()
-        state.ser.write(f"m{mod_id:02d}A\n".encode())
-        state.ser.flush()
-        start = time.time()
-        buffer = b""
-        target = f"m{mod_id:02d}A:".encode('ascii')
-        while time.time() - start < 5.0:
-            if state.ser.in_waiting > 0:
-                try:
-                    chunk = state.ser.read(state.ser.in_waiting)
-                    buffer += chunk
-                    if target in buffer and b'\n' in buffer[buffer.find(target):]:
-                        line = buffer[buffer.find(target):].split(b'\n')[0]
-                        data = line.split(b'A:', 1)[1]
-                        # Format: ver:id:serial:offset:steps:autoHome:curIdx:tunedPairs:flapCount:charMap
-                        parts = data.split(b':')
-                        flap_count = None
-                        char_map_bytes = None
-                        for fc_idx in (8, 9):
-                            if fc_idx < len(parts) - 1:
-                                try:
-                                    fc = int(parts[fc_idx])
-                                    if 1 <= fc <= 64:
-                                        flap_count = fc
-                                        char_map_bytes = b':'.join(parts[fc_idx + 1:])
-                                        break
-                                except ValueError:
-                                    continue
-                        if flap_count and char_map_bytes:
-                            char_map = char_map_bytes.decode('cp1252', errors='replace')
-                            if "module_configs" not in settings:
-                                settings["module_configs"] = {}
-                            settings["module_configs"][str(mod_id)] = {
-                                "flap_count": flap_count,
-                                "char_map": char_map,
-                            }
-                            save_settings(settings)
-                            return True
-                        else:
-                            logging.warning(f"Module {mod_id} A response: could not find flap_count in {len(parts)} fields")
-                except Exception as e:
-                    logging.error(f"A command parse error: {e}")
-            time.sleep(0.05)
-    return False
-
-
 @app.route('/serial_ports', methods=['GET'])
 def list_serial_ports():
     """List available serial ports on the system."""
@@ -615,7 +404,7 @@ def set_serial_port():
                 state.ser.close()
             except Exception:
                 pass
-        state.ser, SERIAL_PORT = _open_serial(new_port)
+        state.ser, SERIAL_PORT = open_serial(new_port)
         state.sim_mode = not state.ser
         universal_firmware.reset()
 
@@ -676,7 +465,7 @@ def connection_config():
         if password is None or password == '':
             password = settings.get('gateway_password', '')
 
-        # Persist before (re)connecting so _open_gateway picks up fresh values.
+        # Persist before (re)connecting so open_gateway picks up fresh values.
         settings['connection_type'] = 'gateway'
         settings['gateway_broker'] = broker
         settings['gateway_port'] = gw_port
@@ -691,7 +480,7 @@ def connection_config():
                     state.ser.close()
                 except Exception:
                     pass
-            state.ser, SERIAL_PORT = _open_gateway({
+            state.ser, SERIAL_PORT = open_gateway({
                 "broker": broker, "port": gw_port, "prefix": prefix,
                 "user": user, "password": password,
             })
@@ -716,7 +505,7 @@ def connection_config():
             except Exception:
                 pass
         port = (data.get('port') or settings.get('serial_port') or '').strip() or None
-        state.ser, SERIAL_PORT = _open_serial(port)
+        state.ser, SERIAL_PORT = open_serial(port)
         state.sim_mode = not state.ser
         universal_firmware.reset()
     return jsonify(
@@ -1028,304 +817,6 @@ def send_to_display(text, order=None, raw=False, step_delay_ms=15):
 
 
 # ============================================================
-#  APP DATA FETCHERS
-# ============================================================
-
-# ============================================================
-#  PLUGIN SYSTEM
-# ============================================================
-# SECURITY NOTE: Functional plugins execute arbitrary Python code.
-# Only install apps from trusted sources. Plugins run with the same
-# permissions as this Flask app. There is no sandboxing.
-
-_plugin_registry = {}
-_plugin_modules = {}
-_plugin_triggers = {}
-_plugin_data = {}
-_plugin_caches = {}
-_registry_cache = {'data': None, 'fetched_at': 0}
-
-
-def load_installed_plugins():
-    global _plugin_registry, _plugin_modules, _plugin_data, _plugin_triggers
-    _plugin_registry.clear()
-    _plugin_modules.clear()
-    _plugin_data.clear()
-    _plugin_triggers.clear()
-    if not os.path.isdir(APPS_PATH):
-        return
-    enabled = settings.get('installed_apps', [])
-    for app_id in os.listdir(APPS_PATH):
-        if app_id not in enabled:
-            continue
-        app_dir = os.path.join(APPS_PATH, app_id)
-        manifest_path = os.path.join(app_dir, "manifest.json")
-        if not os.path.isfile(manifest_path):
-            continue
-        try:
-            with open(manifest_path, "r", encoding='utf-8') as f:
-                manifest = json.load(f)
-            manifest["id"] = app_id
-            _plugin_registry[app_id] = manifest
-            if manifest.get("type") == "channel":
-                _load_channel_data(app_id, app_dir)
-            elif manifest.get("type") == "functional":
-                _load_functional_module(app_id, app_dir)
-            logging.info(f"Plugin loaded: {app_id} ({manifest.get('type')})")
-        except Exception as e:
-            logging.error(f"Failed to load plugin {app_id}: {e}")
-
-
-def _load_channel_data(app_id, app_dir):
-    data_path = os.path.join(app_dir, "data.json")
-    if not os.path.isfile(data_path):
-        return
-    try:
-        with open(data_path, "r", encoding='utf-8') as f:
-            data = json.load(f)
-        pages = []
-        for page in data.get("pages", []):
-            if isinstance(page, str):
-                pages.append(page)
-            elif isinstance(page, dict) and "lines" in page:
-                pages.append(format_lines(*page["lines"]))
-        _plugin_data[app_id] = pages
-    except Exception as e:
-        logging.error(f"Plugin {app_id}: error loading data.json: {e}")
-
-
-def _load_functional_module(app_id, app_dir):
-    module_path = os.path.join(app_dir, "app.py")
-    if not os.path.isfile(module_path):
-        return
-    try:
-        spec = importlib.util.spec_from_file_location(f"plugin_{app_id}", module_path)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        if hasattr(mod, "fetch") and callable(mod.fetch):
-            _plugin_modules[app_id] = mod
-        else:
-            logging.error(f"Plugin {app_id}: app.py has no fetch() function")
-        if hasattr(mod, "trigger") and callable(mod.trigger):
-            _plugin_triggers[app_id] = mod.trigger
-            logging.info(f"Plugin {app_id}: trigger() loaded")
-    except Exception as e:
-        logging.error(f"Plugin {app_id}: error importing app.py: {e}")
-
-
-def get_plugin_pages(app_id):
-    manifest = _plugin_registry.get(app_id)
-    if not manifest:
-        return [format_lines("PLUGIN ERROR", app_id.upper()[:get_cols()], "NOT FOUND")]
-    app_type = manifest.get("type")
-    refresh_interval = manifest.get("refresh_interval", 300)
-    # Allow a plugin setting named 'polling_rate' to override the cache interval
-    _poll = settings.get(f"plugin_{app_id}_polling_rate")
-    if _poll:
-        try:
-            refresh_interval = max(10, int(float(_poll)))
-        except (ValueError, TypeError):
-            pass
-
-    if app_type == "channel":
-        pages = _plugin_data.get(app_id, [])
-        return pages or [format_lines(manifest.get("name", app_id).upper()[:get_cols()], "NO DATA", "")]
-
-    elif app_type == "functional":
-        mod = _plugin_modules.get(app_id)
-        if not mod:
-            return [format_lines("PLUGIN ERROR", app_id.upper()[:get_cols()], "NOT LOADED")]
-        now = time.time()
-        cached = _plugin_caches.get(app_id)
-        if cached and (now - cached["fetched_at"]) < refresh_interval:
-            return cached["pages"]
-        try:
-            plugin_settings = dict(settings)  # full settings for built-in apps
-            for s in manifest.get("settings", []):
-                if s.get('global_key'):
-                    # global_key settings use the key as-is, already in settings
-                    pass
-                else:
-                    key = f"plugin_{app_id}_{s['key']}"
-                    plugin_settings[s["key"]] = settings.get(key, s.get("default", ""))
-            pages = mod.fetch(plugin_settings, format_lines, get_rows, get_cols)
-            if not isinstance(pages, list):
-                pages = [str(pages)]
-            _plugin_caches[app_id] = {"pages": pages, "fetched_at": now}
-            return pages
-        except Exception as e:
-            logging.error(f"Plugin {app_id} fetch error: {e}")
-            cached_pages = _plugin_caches.get(app_id, {}).get("pages")
-            if cached_pages:
-                return cached_pages
-            # Show OFFLINE for network errors, generic error otherwise
-            err_str = str(e).lower()
-            if not state.is_online or 'timeout' in err_str or 'connection' in err_str or 'network' in err_str:
-                return [format_lines(manifest.get("name", app_id).upper()[:get_cols()], "OFFLINE", "")]
-            return [format_lines("APP ERROR", app_id.upper()[:get_cols()], str(e)[:get_cols()])]
-
-    return [format_lines("PLUGIN ERROR", "UNKNOWN TYPE", "")]
-
-
-def get_plugin_app_list():
-    entries = []
-    for app_id, manifest in _plugin_registry.items():
-        entry = {
-            "key": f"plugin_{app_id}",
-            "icon": manifest.get("icon", "🧩"),
-            "name": manifest.get("name", app_id),
-            "desc": manifest.get("description", "")[:30],
-            "plugin": True,
-            "plugin_id": app_id,
-        }
-        if "min_rows" in manifest:
-            entry["min_rows"] = manifest["min_rows"]
-        if "min_cols" in manifest:
-            entry["min_cols"] = manifest["min_cols"]
-        entries.append(entry)
-    entries.sort(key=lambda a: a['name'].lower())
-    return entries
-
-
-_SETTING_PASSTHROUGH_KEYS = (
-    "size",
-    "ph",
-    "min",
-    "max",
-    "step",
-    "stepper",
-    "searchUrl",
-    "resultKey",
-    "maxItems",
-    "compute",
-    "compute_config",
-    "disabled_when",
-    "variant",
-    "title",
-    "text",
-    "items",
-    "icon",
-    "linkText",
-    "linkHref",
-)
-
-
-def _resolve_manifest_setting_key(app_id, raw_key, *, global_key=False):
-    if global_key:
-        return raw_key
-    return f"plugin_{app_id}_{raw_key}"
-
-
-def _build_resolved_settings_lookup(app_id, settings):
-    return {
-        setting["key"]: _resolve_manifest_setting_key(
-            app_id,
-            setting["key"],
-            global_key=setting.get("global_key", False),
-        )
-        for setting in settings
-        if setting.get("key")
-    }
-
-
-def _normalize_inline_toggle(app_id, inline_toggle):
-    inline = dict(inline_toggle)
-    inline_key = inline.get("key")
-    if inline_key:
-        inline["key"] = _resolve_manifest_setting_key(
-            app_id,
-            inline_key,
-            global_key=inline.get("global_key", False),
-        )
-    return inline
-
-
-def _normalize_sync_values(sync_values, map_related_key):
-    return {
-        source_value: {
-            map_related_key(target_key): target_value
-            for target_key, target_value in target_map.items()
-        }
-        for source_value, target_map in sync_values.items()
-    }
-
-
-def _build_plugin_setting_field(app_id, setting, resolved_keys):
-    raw_key = setting["key"]
-    key = resolved_keys[raw_key]
-    field_type = setting.get("type", "text")
-
-    def map_related_key(raw_related_key):
-        if raw_related_key in resolved_keys:
-            return resolved_keys[raw_related_key]
-        return _resolve_manifest_setting_key(app_id, raw_related_key)
-
-    field = {
-        "key": key,
-        "label": setting.get("label", "" if field_type == "notice" else raw_key),
-        "type": field_type,
-        "ph": setting.get("default", ""),
-    }
-
-    if "options" in setting:
-        field["opts"] = setting["options"]
-
-    for pass_key in _SETTING_PASSTHROUGH_KEYS:
-        if pass_key in setting:
-            field[pass_key] = setting[pass_key]
-
-    if "inline_toggle" in setting:
-        field["inline_toggle"] = _normalize_inline_toggle(app_id, setting["inline_toggle"])
-
-    if "sync_values" in setting:
-        field["sync_values"] = _normalize_sync_values(setting["sync_values"], map_related_key)
-
-    if "sync_parent" in setting:
-        field["sync_parent"] = map_related_key(setting["sync_parent"])
-
-    if "sync_parent_custom_value" in setting:
-        field["sync_parent_custom_value"] = setting["sync_parent_custom_value"]
-
-    if "visible_when" in setting:
-        field["visible_when"] = {
-            map_related_key(k): v
-            for k, v in setting["visible_when"].items()
-        }
-
-    if "disabled_when" in setting:
-        field["disabled_when"] = {
-            map_related_key(k): v
-            for k, v in setting["disabled_when"].items()
-        }
-
-    if "watches" in setting:
-        field["watches"] = [map_related_key(k) for k in setting["watches"]]
-
-    return field
-
-
-def get_plugin_settings_config():
-    configs = {}
-    for app_id, manifest in _plugin_registry.items():
-        manifest_settings = [s for s in manifest.get("settings", []) if s.get("key")]
-        resolved_keys = _build_resolved_settings_lookup(app_id, manifest_settings)
-        fields = [
-            _build_plugin_setting_field(app_id, setting, resolved_keys)
-            for setting in manifest_settings
-        ]
-
-        configs[f"plugin_{app_id}"] = {
-            "title": f"{manifest.get('icon', '🧩')} {manifest.get('name', app_id)}",
-            "fields": fields,
-        }
-    return configs
-
-
-os.makedirs(APPS_PATH, exist_ok=True)
-load_installed_plugins()
-
-
-# ============================================================
 #  PLAYLIST LOOP
 # ============================================================
 
@@ -1604,8 +1095,8 @@ def _schedule_loop():
         _schedule_tick()
 
 
-_start_background_task(_schedule_loop)
-_start_background_task(_schedule_tick)
+start_background_task(_schedule_loop)
+start_background_task(_schedule_tick)
 
 def playlist_loop():
 
@@ -1714,7 +1205,7 @@ def playlist_loop():
             state.stop_event.clear()
 
 
-_start_background_task(playlist_loop)
+start_background_task(playlist_loop)
 
 
 # ============================================================
@@ -1748,7 +1239,7 @@ def _startup_auto_home():
         logging.error(f"Auto-home on boot failed: {e}")
 
 
-_start_background_task(_startup_auto_home)
+start_background_task(_startup_auto_home)
 
 # Connected here (not at import time) so the plugin registry and playlist
 # globals that the discovery/state publishers read already exist.
@@ -1832,7 +1323,7 @@ def _trigger_loop():
         _check_triggers()
 
 
-_start_background_task(_trigger_loop)
+start_background_task(_trigger_loop)
 
 
 # ============================================================
@@ -1841,7 +1332,7 @@ _start_background_task(_trigger_loop)
 
 @app.route('/')
 def index():
-    version = _read_version()
+    version = read_version()
     return render_template('index.html', version=version)
 
 @app.route('/current_state')
@@ -2659,7 +2150,7 @@ def _mqtt_publish_network():
 
 
 # Initial check on startup
-_start_background_task(_check_network)
+start_background_task(_check_network)
 
 # Periodic connectivity check every 60s
 def _periodic_network_check():
@@ -2667,7 +2158,7 @@ def _periodic_network_check():
         time.sleep(60)
         _check_network()
 
-_start_background_task(_periodic_network_check)
+start_background_task(_periodic_network_check)
 
 
 @app.route('/mqtt_reconnect', methods=['POST'])
@@ -2886,7 +2377,7 @@ _update_cache = {'checked_at': 0, 'result': None}
 
 @app.route('/version')
 def version_route():
-    return jsonify(version=_read_version())
+    return jsonify(version=read_version())
 
 @app.route('/check_update')
 def check_update():
@@ -2900,7 +2391,7 @@ def check_update():
         resp.raise_for_status()
         data = resp.json()
         latest = data.get('tag_name', '').lstrip('v')
-        current = _read_version()
+        current = read_version()
         has_update = latest and latest != current
         result = {
             'current': current,
@@ -2914,7 +2405,7 @@ def check_update():
         return jsonify(result)
     except Exception as e:
         logging.error(f"Update check error: {e}")
-        return jsonify({'current': _read_version(), 'latest': None, 'has_update': False, 'error': str(e)})
+        return jsonify({'current': read_version(), 'latest': None, 'has_update': False, 'error': str(e)})
 
 @app.route('/apply_update', methods=['POST'])
 def apply_update():

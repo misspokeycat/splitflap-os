@@ -1,0 +1,242 @@
+"""The wire to the display.
+
+One transport is open at a time: a local pyserial port, or a GatewayTransport
+speaking to an ESP32 over MQTT. Both expose the same pyserial-compatible
+surface, so nothing downstream knows which is active. With neither available
+the server runs in simulation mode and renders to the web UI only.
+
+serial_lock serialises access: the display loop, the tuning routes and the
+firmware manager all write to the same port.
+"""
+
+import logging
+import os
+import threading
+import time
+
+import serial
+import serial.tools.list_ports
+
+from hardware.universal_firmware import UniversalFirmwareManager
+from splitflap.settings import read_config_file, save_settings, settings
+from splitflap.state import state
+
+try:
+    from gateway_transport import GatewayTransport, GatewayConnectionError
+except ImportError:
+    GatewayTransport = None
+
+    class GatewayConnectionError(Exception):
+        pass
+
+
+SERIAL_PORT_DEFAULT = '/dev/ttyUSB0'
+BAUD_RATE = 9600
+
+serial_lock = threading.Lock()
+
+
+def get_serial_port(data=None):
+    """Resolve serial port: env var > settings.json > default.
+
+    Pass an already-loaded settings dict as ``data`` to avoid re-reading
+    settings.json (see open_connection).
+    """
+    env_port = os.environ.get("SPLITFLAP_SERIAL_PORT")
+    if env_port:
+        return env_port
+    if data is None:
+        data = read_config_file()
+    if data.get("serial_port"):
+        return data["serial_port"]
+    return SERIAL_PORT_DEFAULT
+
+def get_connection_type(data=None):
+    """Resolve the active connection type: env var > settings.json > 'serial'.
+
+    Returns either 'serial' (local USB/serial port) or 'gateway' (MQTT
+    SplitFlap Gateway). Pass an already-loaded settings dict as ``data`` to
+    avoid re-reading settings.json.
+    """
+    env_type = os.environ.get("SPLITFLAP_CONNECTION_TYPE")
+    if env_type:
+        return env_type.strip().lower()
+    if data is None:
+        data = read_config_file()
+    ct = data.get("connection_type", "serial")
+    return (ct or "serial").strip().lower()
+
+def get_gateway_config(data=None):
+    """Pull the gateway MQTT settings from env/settings.json.
+
+    Pass an already-loaded settings dict as ``data`` to avoid re-reading
+    settings.json.
+    """
+    if data is None:
+        data = read_config_file()
+    return {
+        "broker":   os.environ.get("SPLITFLAP_GATEWAY_BROKER",   data.get("gateway_broker", "")),
+        "port":     int(os.environ.get("SPLITFLAP_GATEWAY_PORT", data.get("gateway_port", 1883)) or 1883),
+        "prefix":   os.environ.get("SPLITFLAP_GATEWAY_PREFIX",   data.get("gateway_prefix", "splitflap")),
+        "user":     os.environ.get("SPLITFLAP_GATEWAY_USER",     data.get("gateway_user", "")),
+        "password": os.environ.get("SPLITFLAP_GATEWAY_PASSWORD", data.get("gateway_password", "")),
+    }
+
+
+def open_serial(port=None):
+    """Open a serial connection. Returns (Serial, port) or (None, port)."""
+    port = port or get_serial_port()
+    try:
+        s = serial.Serial(port, BAUD_RATE, timeout=0.5)
+        logging.info(f"Serial connected: {port}")
+        return s, port
+    except Exception as e:
+        logging.error(f"Serial failed on {port}. Simulation Mode. Reason: {e}")
+        return None, port
+
+def open_gateway(cfg=None):
+    """Open an MQTT gateway connection. Returns (GatewayTransport, label) or (None, label)."""
+    cfg = cfg or get_gateway_config()
+    label = f"gateway:{cfg.get('broker','')}:{cfg.get('port',1883)}"
+    if GatewayTransport is None:
+        logging.error("Gateway selected but paho-mqtt/gateway_transport unavailable. Simulation Mode.")
+        return None, label
+    if not cfg.get("broker"):
+        logging.error("Gateway selected but no broker configured. Simulation Mode.")
+        return None, label
+    try:
+        t = GatewayTransport(
+            broker=cfg["broker"],
+            port=cfg.get("port", 1883),
+            prefix=cfg.get("prefix", "splitflap"),
+            username=cfg.get("user", ""),
+            password=cfg.get("password", ""),
+        )
+        logging.info(f"Gateway connected: {label} prefix={cfg.get('prefix','splitflap')}")
+        return t, label
+    except GatewayConnectionError as e:
+        logging.error(f"Gateway failed ({label}). Simulation Mode. Reason: {e}")
+        return None, label
+    except Exception as e:
+        logging.error(f"Gateway error ({label}). Simulation Mode. Reason: {e}")
+        return None, label
+
+def open_connection():
+    """Open the active connection based on the configured connection type.
+
+    Returns (transport_or_None, descriptor_string). The transport exposes a
+    pyserial-compatible surface in both modes, so all downstream code is
+    agnostic to which one is active.
+    """
+    # Read settings.json once and thread it through the resolvers below so
+    # startup doesn't re-open the file for each setting it needs.
+    data = read_config_file()
+    if get_connection_type(data) == "gateway":
+        return open_gateway(get_gateway_config(data))
+    return open_serial(get_serial_port(data))
+
+
+def send_raw(cmd):
+    if not cmd.endswith('\n'):
+        cmd += '\n'
+    with serial_lock:
+        if state.ser and not state.sim_mode:
+            state.ser.write(cmd.encode())
+            state.ser.flush()
+            time.sleep(0.02)
+
+def sync_hardware_data(mod_id):
+    if not state.ser:
+        return False
+    with serial_lock:
+        state.ser.reset_input_buffer()
+        state.ser.write(f"m{mod_id:02d}d\n".encode())
+        state.ser.flush()
+        start = time.time()
+        buffer = ""
+        target = f"m{mod_id:02d}d:"
+        while time.time() - start < 5.0:
+            if state.ser.in_waiting > 0:
+                try:
+                    chunk = state.ser.read(state.ser.in_waiting).decode('utf-8', errors='ignore')
+                    buffer += chunk
+                    if target in buffer and '\n' in buffer[buffer.find(target):]:
+                        valid_part = buffer[buffer.find(target):].split('\n')[0]
+                        data = valid_part.split('d:', 1)[1]
+                        parts = data.split(':')
+                        if len(parts) >= 2:
+                            settings['offsets'][str(mod_id)] = int(parts[0])
+                            settings['calibrations'][str(mod_id)] = int(parts[1])
+                            settings['tuned_chars'][str(mod_id)] = {}
+                            if len(parts) == 3 and parts[2]:
+                                for p in parts[2].split(','):
+                                    if '=' in p:
+                                        idx, val = p.split('=')
+                                        settings['tuned_chars'][str(mod_id)][idx] = int(val)
+                            save_settings(settings)
+                            return True
+                except Exception as e:
+                    logging.error(f"Parse error: {e}")
+            time.sleep(0.05)
+    return False
+
+
+def sync_module_config(mod_id):
+    """Query module's A command for flap count and character map (Universal Firmware v31+)."""
+    if not state.ser:
+        return False
+    with serial_lock:
+        state.ser.reset_input_buffer()
+        state.ser.write(f"m{mod_id:02d}A\n".encode())
+        state.ser.flush()
+        start = time.time()
+        buffer = b""
+        target = f"m{mod_id:02d}A:".encode('ascii')
+        while time.time() - start < 5.0:
+            if state.ser.in_waiting > 0:
+                try:
+                    chunk = state.ser.read(state.ser.in_waiting)
+                    buffer += chunk
+                    if target in buffer and b'\n' in buffer[buffer.find(target):]:
+                        line = buffer[buffer.find(target):].split(b'\n')[0]
+                        data = line.split(b'A:', 1)[1]
+                        # Format: ver:id:serial:offset:steps:autoHome:curIdx:tunedPairs:flapCount:charMap
+                        parts = data.split(b':')
+                        flap_count = None
+                        char_map_bytes = None
+                        for fc_idx in (8, 9):
+                            if fc_idx < len(parts) - 1:
+                                try:
+                                    fc = int(parts[fc_idx])
+                                    if 1 <= fc <= 64:
+                                        flap_count = fc
+                                        char_map_bytes = b':'.join(parts[fc_idx + 1:])
+                                        break
+                                except ValueError:
+                                    continue
+                        if flap_count and char_map_bytes:
+                            char_map = char_map_bytes.decode('cp1252', errors='replace')
+                            if "module_configs" not in settings:
+                                settings["module_configs"] = {}
+                            settings["module_configs"][str(mod_id)] = {
+                                "flap_count": flap_count,
+                                "char_map": char_map,
+                            }
+                            save_settings(settings)
+                            return True
+                        else:
+                            logging.warning(f"Module {mod_id} A response: could not find flap_count in {len(parts)} fields")
+                except Exception as e:
+                    logging.error(f"A command parse error: {e}")
+            time.sleep(0.05)
+    return False
+
+
+state.ser, state.serial_port = open_connection()
+state.sim_mode = not state.ser
+
+universal_firmware = UniversalFirmwareManager(
+    get_serial=lambda: state.ser,
+    serial_lock=serial_lock,
+    get_sim_mode=lambda: state.sim_mode,
+)

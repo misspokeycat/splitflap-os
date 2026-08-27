@@ -29,7 +29,13 @@ if str(SERVER_DIR) not in sys.path:
 import app  # noqa: E402
 from splitflap.state import resize_grid, state  # noqa: E402
 
-SOURCE = (SERVER_DIR / "app.py").read_text(encoding="utf-8")
+# Every line of server source, concatenated. A few tests assert on structure
+# that cannot be observed at runtime (what runs at import, and in what order);
+# spanning the whole package keeps them working when code moves between files.
+SOURCE = "\n".join(
+    path.read_text(encoding="utf-8")
+    for path in [SERVER_DIR / "app.py"] + sorted((SERVER_DIR / "splitflap").rglob("*.py"))
+)
 
 
 class FakeMqttClient:
