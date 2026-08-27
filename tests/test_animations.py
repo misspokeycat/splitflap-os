@@ -8,9 +8,10 @@ an invariant across all of them.
 
 import unittest
 
-from support import app  # noqa: F401  (sets up sys.path)
+from support import app  # noqa: F401  (imported first: it sets up sys.path)
 
 from splitflap.animations import get_animation_order
+from splitflap.settings import settings
 
 STYLES = [
     'ltr', 'rtl', 'center_out', 'outside_in', 'spiral', 'diagonal',
@@ -58,7 +59,7 @@ class AnimationOrderTests(unittest.TestCase):
         self.assertEqual(get_animation_order('rain', 2, 3), [0, 1, 2, 3, 4, 5])
 
     def test_order_defaults_to_the_configured_grid(self):
-        app.settings['sim_rows'], app.settings['sim_cols'] = 3, 15
+        settings['sim_rows'], settings['sim_cols'] = 3, 15
         self.assertEqual(len(get_animation_order('spiral')), 45)
 
 

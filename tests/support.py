@@ -27,6 +27,7 @@ if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
 import app  # noqa: E402
+from splitflap.settings import settings  # noqa: E402
 from splitflap.state import resize_grid, state  # noqa: E402
 
 # Every line of server source, concatenated. A few tests assert on structure
@@ -85,7 +86,28 @@ class SplitflapTestCase(unittest.TestCase):
     the next one.
     """
 
+    def _splitflap_modules(self):
+        """app plus every splitflap module currently imported."""
+        return [app] + [
+            mod for name, mod in list(sys.modules.items())
+            if mod is not None and (name == "splitflap" or name.startswith("splitflap."))
+        ]
+
+    def patch_everywhere(self, attr, value):
+        """Rebind a name in every module that imported it.
+
+        Modules do `from splitflap.transport import send_raw`, which binds the
+        function object at import time. Patching a single module's copy leaves
+        every other module calling the real one — which, for send_raw, means
+        writing to the serial port during a test.
+        """
+        for mod in self._splitflap_modules():
+            if hasattr(mod, attr):
+                self._patched.append((mod, attr, getattr(mod, attr)))
+                setattr(mod, attr, value)
+
     def setUp(self):
+        self._patched = []
         self._saved_state = {
             k: copy.copy(v) if isinstance(v, (list, dict, set)) else v
             for k, v in vars(state).items()
@@ -93,24 +115,23 @@ class SplitflapTestCase(unittest.TestCase):
         # settings is one dict shared by every module, so it has to be
         # snapshotted and restored in place — rebinding it would leave
         # splitflap.grid and friends reading the original.
-        self._saved_settings = copy.deepcopy(app.settings)
-        self._saved_send_raw = app.send_raw
-
+        self._saved_settings = copy.deepcopy(settings)
         self.client = FakeMqttClient()
         state.mqtt_client = self.client
         self.sent = []
-        app.send_raw = self.sent.append
+        self.patch_everywhere("send_raw", self.sent.append)
 
     def tearDown(self):
         vars(state).clear()
         vars(state).update(self._saved_state)
-        app.settings.clear()
-        app.settings.update(self._saved_settings)
-        app.send_raw = self._saved_send_raw
+        for mod, attr, original in reversed(self._patched):
+            setattr(mod, attr, original)
+        settings.clear()
+        settings.update(self._saved_settings)
         state.stop_event.clear()
         resize_grid()
 
     def set_grid(self, rows, cols):
-        app.settings["sim_rows"] = rows
-        app.settings["sim_cols"] = cols
+        settings["sim_rows"] = rows
+        settings["sim_cols"] = cols
         resize_grid()

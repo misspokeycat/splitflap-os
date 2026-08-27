@@ -11,6 +11,9 @@ from unittest import mock
 
 from support import SplitflapTestCase, app, state
 
+from splitflap.grid import get_module_count
+from splitflap.settings import settings
+
 
 # Frozen inventory of the HTTP surface: (rule, endpoint, methods).
 # Moving a route between modules must not change any of these. Adding a route
@@ -237,7 +240,7 @@ class WriteRouteSmokeTests(RouteSmokeTestCase):
         state.is_homed = False
         self.http.get("/home_all")
         self.assertTrue(state.is_homed)
-        self.assertEqual(state.current_display_string, " " * app.get_module_count())
+        self.assertEqual(state.current_display_string, " " * get_module_count())
 
 
 if __name__ == "__main__":
