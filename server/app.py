@@ -25,6 +25,7 @@ from splitflap.settings import (
     save_settings,
     settings,
 )
+from splitflap.state import resize_grid, state
 from splitflap.grid import format_lines, get_cols, get_module_count, get_rows
 from tuning import build_tuning_adjust_commands
 from hardware.universal_firmware import (
@@ -170,18 +171,13 @@ def _open_connection():
         return _open_gateway(_get_gateway_config(data))
     return _open_serial(_get_serial_port(data))
 
-ser, SERIAL_PORT = _open_connection()
-
-# --- GLOBAL STATE ---
-current_indices = [-1] * 45  # resized after settings load
-current_display_string = " " * 45
-is_homed = False
-sim_mode = not ser  # auto-enable simulation if no serial hardware
+state.ser, state.serial_port = _open_connection()
+state.sim_mode = not state.ser
 
 universal_firmware = UniversalFirmwareManager(
-    get_serial=lambda: ser,
+    get_serial=lambda: state.ser,
     serial_lock=serial_lock,
-    get_sim_mode=lambda: sim_mode,
+    get_sim_mode=lambda: state.sim_mode,
 )
 
 
@@ -193,13 +189,6 @@ universal_firmware = UniversalFirmwareManager(
 #  GRID HELPERS
 # ============================================================
 
-def resize_grid():
-    global current_indices, current_display_string
-    n = get_module_count()
-    current_indices = [-1] * n
-    current_display_string = " " * n
-
-resize_grid()
 
 
 # ============================================================
@@ -250,10 +239,6 @@ MQTT_DEVICE = {
     "model": "SplitFlap 45-Module",
 }
 
-mqtt_client = None
-mqtt_last_text = ""
-
-
 def _get_mqtt_app_options():
     """Build dynamic app list from plugin registry."""
     return ["off"] + sorted(_plugin_registry.keys())
@@ -289,19 +274,19 @@ def _mqtt_format_text(payload):
 
 def mqtt_publish_state():
     """Publish current display state and active mode to MQTT."""
-    if not mqtt_client or not mqtt_client.is_connected():
+    if not state.mqtt_client or not state.mqtt_client.is_connected():
         return
-    mqtt_client.publish(MQTT_STATUS_STATE, current_display_string, retain=True)
-    mqtt_client.publish(MQTT_TEXT_STATE, mqtt_last_text, retain=True)
-    mqtt_client.publish(MQTT_MODE_STATE, active_app or "off", retain=True)
+    state.mqtt_client.publish(MQTT_STATUS_STATE, state.current_display_string, retain=True)
+    state.mqtt_client.publish(MQTT_TEXT_STATE, state.mqtt_last_text, retain=True)
+    state.mqtt_client.publish(MQTT_MODE_STATE, state.active_app or "off", retain=True)
     center_state = "ON" if settings.get('mqtt_center', True) else "OFF"
-    mqtt_client.publish(MQTT_CENTER_STATE, center_state, retain=True)
-    mqtt_client.publish(MQTT_PLAYLIST_STATE, app_playlist_name or "off", retain=True)
+    state.mqtt_client.publish(MQTT_CENTER_STATE, center_state, retain=True)
+    state.mqtt_client.publish(MQTT_PLAYLIST_STATE, state.app_playlist_name or "off", retain=True)
 
 
 def mqtt_publish_discovery():
     """Publish Home Assistant MQTT discovery config for all entities."""
-    if not mqtt_client:
+    if not state.mqtt_client:
         return
     avail = {"topic": MQTT_AVAIL_TOPIC, "payload_available": "online", "payload_not_available": "offline"}
 
@@ -397,9 +382,9 @@ def mqtt_publish_discovery():
     ]
     for component, object_id, payload in configs:
         topic = f"homeassistant/{component}/{object_id}/config"
-        mqtt_client.publish(topic, json.dumps(payload), retain=True)
+        state.mqtt_client.publish(topic, json.dumps(payload), retain=True)
     # Remove deprecated entities
-    mqtt_client.publish("homeassistant/select/splitflap_mode/config", "", retain=True)
+    state.mqtt_client.publish("homeassistant/select/splitflap_mode/config", "", retain=True)
     logging.info("MQTT discovery payloads published")
 
 
@@ -420,9 +405,6 @@ def _mqtt_on_connect(client, userdata, flags, rc, properties=None):
 
 
 def _mqtt_on_message(client, userdata, msg):
-    global active_app, current_playlist, last_sent_page, loop_delay
-    global active_app_playlist, app_playlist_loop, app_playlist_name
-    global is_homed, current_indices, current_display_string, mqtt_last_text
     payload = msg.payload.decode('utf-8', errors='ignore').strip()
 
     if msg.topic == "homeassistant/status" and payload == "online":
@@ -431,12 +413,12 @@ def _mqtt_on_message(client, userdata, msg):
         return
 
     if msg.topic == MQTT_TEXT_CMD:
-        active_app = None
-        active_app_playlist = None
-        mqtt_last_text = payload
-        current_playlist = [_mqtt_format_text(payload)]
-        last_sent_page = None
-        stop_event.set()
+        state.active_app = None
+        state.active_app_playlist = None
+        state.mqtt_last_text = payload
+        state.current_playlist = [_mqtt_format_text(payload)]
+        state.last_sent_page = None
+        state.stop_event.set()
         mqtt_publish_state()
 
     elif msg.topic == MQTT_CENTER_CMD:
@@ -446,84 +428,82 @@ def _mqtt_on_message(client, userdata, msg):
 
     elif msg.topic == MQTT_MODE_CMD:
         if payload == "off":
-            active_app = None
-            active_app_playlist = None
-            stop_event.set()
+            state.active_app = None
+            state.active_app_playlist = None
+            state.stop_event.set()
         elif payload in _plugin_registry:
-            active_app = payload
-            active_app_playlist = None
+            state.active_app = payload
+            state.active_app_playlist = None
             manifest = _plugin_registry[payload]
             if manifest.get('animation'):
-                loop_delay = max(0.1, float(settings.get('anim_speed', '0.4')))
+                state.loop_delay = max(0.1, float(settings.get('anim_speed', '0.4')))
             else:
                 saved = settings.get(f'plugin_{payload}_loop_delay', '')
-                loop_delay = float(saved) if saved else float(manifest.get('loop_delay', 5))
-            stop_event.set()
+                state.loop_delay = float(saved) if saved else float(manifest.get('loop_delay', 5))
+            state.stop_event.set()
         mqtt_publish_state()
 
     elif msg.topic == MQTT_PLAYLIST_CMD:
         if payload == "off":
-            active_app_playlist = None
-            active_app = None
-            stop_event.set()
+            state.active_app_playlist = None
+            state.active_app = None
+            state.stop_event.set()
         else:
             playlists = settings.get('saved_app_playlists', {})
             if payload in playlists:
                 pl = playlists[payload]
-                active_app_playlist = pl.get('entries', [])
-                app_playlist_loop = pl.get('loop', True)
-                app_playlist_name = payload
-                active_app = None
-                current_playlist = []
-                last_sent_page = None
-                stop_event.set()
+                state.active_app_playlist = pl.get('entries', [])
+                state.app_playlist_loop = pl.get('loop', True)
+                state.app_playlist_name = payload
+                state.active_app = None
+                state.current_playlist = []
+                state.last_sent_page = None
+                state.stop_event.set()
         mqtt_publish_state()
 
     elif msg.topic == f"{MQTT_TOPIC_PREFIX}/home/set":
         send_raw("m**h")
-        active_app = None
-        active_app_playlist = None
-        is_homed = True
-        current_indices = [0] * get_module_count()
-        current_display_string = " " * get_module_count()
+        state.active_app = None
+        state.active_app_playlist = None
+        state.is_homed = True
+        state.current_indices = [0] * get_module_count()
+        state.current_display_string = " " * get_module_count()
         mqtt_publish_state()
 
 
 def mqtt_setup():
     """Initialize MQTT client and connect to broker. Fails gracefully."""
-    global mqtt_client
     if not mqtt or not settings.get('mqtt_enabled', False):
         logging.info("MQTT disabled or paho-mqtt not installed")
         return
     try:
-        mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="splitflap_display")
+        state.mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="splitflap_display")
         user = settings.get('mqtt_user', '').strip()
         pw = settings.get('mqtt_password', '').strip()
         if user:
-            mqtt_client.username_pw_set(user, pw)
-        mqtt_client.will_set(MQTT_AVAIL_TOPIC, "offline", qos=1, retain=True)
-        mqtt_client.on_connect = _mqtt_on_connect
-        mqtt_client.on_message = _mqtt_on_message
+            state.mqtt_client.username_pw_set(user, pw)
+        state.mqtt_client.will_set(MQTT_AVAIL_TOPIC, "offline", qos=1, retain=True)
+        state.mqtt_client.on_connect = _mqtt_on_connect
+        state.mqtt_client.on_message = _mqtt_on_message
         broker = settings.get('mqtt_broker', 'homeassistant.local')
         port = int(settings.get('mqtt_port', 1883))
-        mqtt_client.connect_async(broker, port)
-        mqtt_client.loop_start()
+        state.mqtt_client.connect_async(broker, port)
+        state.mqtt_client.loop_start()
         logging.info(f"MQTT connecting to {broker}:{port}")
     except Exception as e:
-        mqtt_client = None
+        state.mqtt_client = None
         logging.error(f"MQTT setup failed: {e}")
 
 
 def mqtt_reconnect():
     """Disconnect and reconnect MQTT with current settings."""
-    global mqtt_client
-    if mqtt_client:
+    if state.mqtt_client:
         try:
-            mqtt_client.loop_stop()
-            mqtt_client.disconnect()
+            state.mqtt_client.loop_stop()
+            state.mqtt_client.disconnect()
         except Exception:
             pass
-        mqtt_client = None
+        state.mqtt_client = None
     mqtt_setup()
 
 
@@ -535,25 +515,25 @@ def send_raw(cmd):
     if not cmd.endswith('\n'):
         cmd += '\n'
     with serial_lock:
-        if ser and not sim_mode:
-            ser.write(cmd.encode())
-            ser.flush()
+        if state.ser and not state.sim_mode:
+            state.ser.write(cmd.encode())
+            state.ser.flush()
             time.sleep(0.02)
 
 def sync_hardware_data(mod_id):
-    if not ser:
+    if not state.ser:
         return False
     with serial_lock:
-        ser.reset_input_buffer()
-        ser.write(f"m{mod_id:02d}d\n".encode())
-        ser.flush()
+        state.ser.reset_input_buffer()
+        state.ser.write(f"m{mod_id:02d}d\n".encode())
+        state.ser.flush()
         start = time.time()
         buffer = ""
         target = f"m{mod_id:02d}d:"
         while time.time() - start < 5.0:
-            if ser.in_waiting > 0:
+            if state.ser.in_waiting > 0:
                 try:
-                    chunk = ser.read(ser.in_waiting).decode('utf-8', errors='ignore')
+                    chunk = state.ser.read(state.ser.in_waiting).decode('utf-8', errors='ignore')
                     buffer += chunk
                     if target in buffer and '\n' in buffer[buffer.find(target):]:
                         valid_part = buffer[buffer.find(target):].split('\n')[0]
@@ -578,19 +558,19 @@ def sync_hardware_data(mod_id):
 
 def sync_module_config(mod_id):
     """Query module's A command for flap count and character map (Universal Firmware v31+)."""
-    if not ser:
+    if not state.ser:
         return False
     with serial_lock:
-        ser.reset_input_buffer()
-        ser.write(f"m{mod_id:02d}A\n".encode())
-        ser.flush()
+        state.ser.reset_input_buffer()
+        state.ser.write(f"m{mod_id:02d}A\n".encode())
+        state.ser.flush()
         start = time.time()
         buffer = b""
         target = f"m{mod_id:02d}A:".encode('ascii')
         while time.time() - start < 5.0:
-            if ser.in_waiting > 0:
+            if state.ser.in_waiting > 0:
                 try:
-                    chunk = ser.read(ser.in_waiting)
+                    chunk = state.ser.read(state.ser.in_waiting)
                     buffer += chunk
                     if target in buffer and b'\n' in buffer[buffer.find(target):]:
                         line = buffer[buffer.find(target):].split(b'\n')[0]
@@ -637,7 +617,7 @@ def list_serial_ports():
             "description": p.description,
             "hwid": p.hwid
         })
-    return jsonify(ports=ports, current=SERIAL_PORT)
+    return jsonify(ports=ports, current=state.serial_port)
 
 
 @app.route('/serial_port', methods=['POST'])
@@ -647,26 +627,25 @@ def set_serial_port():
     Applying a serial port also switches the active connection type back to
     'serial' (in case the gateway was previously selected).
     """
-    global ser, sim_mode, SERIAL_PORT
     data = request.json
     new_port = data.get('port', '').strip()
     if not new_port:
         return jsonify(status="error", message="No port specified"), 400
 
     with serial_lock:
-        if ser:
+        if state.ser:
             try:
-                ser.close()
+                state.ser.close()
             except Exception:
                 pass
-        ser, SERIAL_PORT = _open_serial(new_port)
-        sim_mode = not ser
+        state.ser, SERIAL_PORT = _open_serial(new_port)
+        state.sim_mode = not state.ser
         universal_firmware.reset()
 
     settings['serial_port'] = new_port
     settings['connection_type'] = 'serial'
     save_settings(settings)
-    return jsonify(status="success", port=SERIAL_PORT, sim_mode=sim_mode)
+    return jsonify(status="success", port=state.serial_port, sim_mode=state.sim_mode)
 
 
 @app.route('/connection', methods=['GET', 'POST'])
@@ -679,7 +658,6 @@ def connection_config():
     POST body (serial):
         {"type":"serial","port":"/dev/ttyUSB0"}   # port optional
     """
-    global ser, sim_mode, SERIAL_PORT
     if request.method == 'GET':
         return jsonify(
             type=settings.get('connection_type', 'serial'),
@@ -691,9 +669,9 @@ def connection_config():
             # Password intentionally not echoed back in full for safety;
             # report whether one is set instead.
             gateway_password_set=bool(settings.get('gateway_password', '')),
-            sim_mode=sim_mode,
-            connected=ser is not None,
-            descriptor=SERIAL_PORT,
+            sim_mode=state.sim_mode,
+            connected=state.ser is not None,
+            descriptor=state.serial_port,
         )
 
     data = request.json or {}
@@ -731,23 +709,23 @@ def connection_config():
         save_settings(settings)
 
         with serial_lock:
-            if ser:
+            if state.ser:
                 try:
-                    ser.close()
+                    state.ser.close()
                 except Exception:
                     pass
-            ser, SERIAL_PORT = _open_gateway({
+            state.ser, SERIAL_PORT = _open_gateway({
                 "broker": broker, "port": gw_port, "prefix": prefix,
                 "user": user, "password": password,
             })
-            sim_mode = not ser
+            state.sim_mode = not state.ser
             universal_firmware.reset()
         return jsonify(
             status="success",
             type="gateway",
-            descriptor=SERIAL_PORT,
-            sim_mode=sim_mode,
-            message="Gateway connected" if not sim_mode
+            descriptor=state.serial_port,
+            sim_mode=state.sim_mode,
+            message="Gateway connected" if not state.sim_mode
                     else "Saved, but could not reach gateway — simulation mode",
         )
 
@@ -755,21 +733,21 @@ def connection_config():
     settings['connection_type'] = 'serial'
     save_settings(settings)
     with serial_lock:
-        if ser:
+        if state.ser:
             try:
-                ser.close()
+                state.ser.close()
             except Exception:
                 pass
         port = (data.get('port') or settings.get('serial_port') or '').strip() or None
-        ser, SERIAL_PORT = _open_serial(port)
-        sim_mode = not ser
+        state.ser, SERIAL_PORT = _open_serial(port)
+        state.sim_mode = not state.ser
         universal_firmware.reset()
     return jsonify(
         status="success",
         type="serial",
-        descriptor=SERIAL_PORT,
-        sim_mode=sim_mode,
-        message="Serial connected" if not sim_mode
+        descriptor=state.serial_port,
+        sim_mode=state.sim_mode,
+        message="Serial connected" if not state.sim_mode
                 else "Saved, but could not open serial — simulation mode",
     )
 
@@ -990,7 +968,6 @@ COLOR_MAP = {
 
 def send_to_display_sync(text):
     """Send modules staggered so all arrive at their target character simultaneously."""
-    global current_indices, current_display_string, is_homed
     if not text:
         return 0
     clean_text = unicodedata.normalize('NFC', text.upper())
@@ -1011,7 +988,7 @@ def send_to_display_sync(text):
         if target_idx == -1:
             target_idx = 0
         # Treat -1 (pre-home unknown) as position 0 so sync stagger works on first run
-        current = 0 if current_indices[i] == -1 else current_indices[i]
+        current = 0 if state.current_indices[i] == -1 else state.current_indices[i]
         dist = (target_idx - current) % flap_count
         dists.append((i, char, target_idx, dist, flap_count))
 
@@ -1026,20 +1003,19 @@ def send_to_display_sync(text):
             remaining = delay_before - elapsed
             if remaining > 0:
                 time.sleep(remaining)
-            if ser and not sim_mode:
-                ser.write(f"m{i:02d}-{char}\n".encode('cp1252', errors='replace'))
-                ser.flush()
-            current_indices[i] = target_idx
+            if state.ser and not state.sim_mode:
+                state.ser.write(f"m{i:02d}-{char}\n".encode('cp1252', errors='replace'))
+                state.ser.flush()
+            state.current_indices[i] = target_idx
 
-    current_display_string = clean_text
-    is_homed = True
+    state.current_display_string = clean_text
+    state.is_homed = True
     mqtt_publish_state()
     return max_dist
 
 
 def send_to_display_slot(text, effect_speed=80):
     """Slot machine: all modules spin to random chars, then lock in L→R."""
-    global current_indices, current_display_string, is_homed
     if not text:
         return 0
     clean_text = unicodedata.normalize('NFC', text.upper())
@@ -1062,12 +1038,12 @@ def send_to_display_slot(text, effect_speed=80):
         spin_chars.append(random.choice(candidates) if candidates else char_map[1])
     with serial_lock:
         for i in range(n):
-            if ser and not sim_mode:
-                ser.write(f"m{i:02d}-{spin_chars[i]}\n".encode('cp1252', errors='replace'))
-                ser.flush()
+            if state.ser and not state.sim_mode:
+                state.ser.write(f"m{i:02d}-{spin_chars[i]}\n".encode('cp1252', errors='replace'))
+                state.ser.flush()
             char_map = get_module_char_map(i)
             idx = char_map.find(spin_chars[i])
-            current_indices[i] = idx if idx != -1 else 0
+            state.current_indices[i] = idx if idx != -1 else 0
 
     time.sleep(1.5)
 
@@ -1076,29 +1052,28 @@ def send_to_display_slot(text, effect_speed=80):
     with serial_lock:
         for i in range(n):
             char = clean_text[i]
-            if ser and not sim_mode:
-                ser.write(f"m{i:02d}-{char}\n".encode('cp1252', errors='replace'))
-                ser.flush()
+            if state.ser and not state.sim_mode:
+                state.ser.write(f"m{i:02d}-{char}\n".encode('cp1252', errors='replace'))
+                state.ser.flush()
                 time.sleep(effect_speed / 1000.0)
             char_map = get_module_char_map(i)
             flap_count = get_module_flap_count(i)
             target_idx = char_map.find(char)
             if target_idx == -1:
                 target_idx = 0
-            dist = (target_idx - current_indices[i]) % flap_count
+            dist = (target_idx - state.current_indices[i]) % flap_count
             if dist > max_dist:
                 max_dist = dist
-            current_indices[i] = target_idx
+            state.current_indices[i] = target_idx
 
-    current_display_string = clean_text
-    is_homed = True
+    state.current_display_string = clean_text
+    state.is_homed = True
     mqtt_publish_state()
     return max_dist
 
 
 def _send_with_effect(page_text, page_style, page_speed, is_anim, app_id=None):
     """Dispatch a page send using the active transition style (per-page > per-app > global)."""
-    global last_transition_style, last_transition_speed
     if is_anim:
         return send_to_display(page_text, get_animation_order(page_style or 'ltr'), raw=True, step_delay_ms=page_speed)
     # Priority: per-page > per-app > global
@@ -1108,8 +1083,8 @@ def _send_with_effect(page_text, page_style, page_speed, is_anim, app_id=None):
     app_speed = settings.get(f'plugin_{app_id}_transition_speed') if app_id else None
     speed = page_speed if page_speed is not None else \
             (int(app_speed) if app_speed else int(settings.get('transition_speed', 15)))
-    last_transition_style = style
-    last_transition_speed = speed
+    state.last_transition_style = style
+    state.last_transition_speed = speed
     if style == 'sync':
         return send_to_display_sync(page_text)
     if style == 'slot':
@@ -1118,7 +1093,6 @@ def _send_with_effect(page_text, page_style, page_speed, is_anim, app_id=None):
 
 
 def send_to_display(text, order=None, raw=False, step_delay_ms=15):
-    global current_indices, current_display_string, is_homed
     if not text:
         return 0
 
@@ -1148,8 +1122,8 @@ def send_to_display(text, order=None, raw=False, step_delay_ms=15):
 
     # Update sim state immediately so the browser reflects the new text without waiting
     # for the serial loop to complete (fixes sim lag on hardware transitions)
-    current_display_string = clean_text
-    is_homed = True
+    state.current_display_string = clean_text
+    state.is_homed = True
     mqtt_publish_state()
 
     max_dist = 0
@@ -1158,19 +1132,19 @@ def send_to_display(text, order=None, raw=False, step_delay_ms=15):
             if i >= len(clean_text):
                 continue
             char = clean_text[i]
-            if ser and not sim_mode:
-                ser.write(f"m{i:02d}-{char}\n".encode('cp1252', errors='replace'))
-                ser.flush()
+            if state.ser and not state.sim_mode:
+                state.ser.write(f"m{i:02d}-{char}\n".encode('cp1252', errors='replace'))
+                state.ser.flush()
                 time.sleep(step_delay_ms / 1000.0)
 
             target_idx = get_module_char_map(i).find(char)
             if target_idx == -1:
                 target_idx = 0
             flap_count = get_module_flap_count(i)
-            dist = 128 if current_indices[i] == -1 else (target_idx - current_indices[i]) % flap_count
+            dist = 128 if state.current_indices[i] == -1 else (target_idx - state.current_indices[i]) % flap_count
             if dist > max_dist:
                 max_dist = dist
-            current_indices[i] = target_idx
+            state.current_indices[i] = target_idx
 
     return max_dist
 
@@ -1309,7 +1283,7 @@ def get_plugin_pages(app_id):
                 return cached_pages
             # Show OFFLINE for network errors, generic error otherwise
             err_str = str(e).lower()
-            if not _is_online or 'timeout' in err_str or 'connection' in err_str or 'network' in err_str:
+            if not state.is_online or 'timeout' in err_str or 'connection' in err_str or 'network' in err_str:
                 return [format_lines(manifest.get("name", app_id).upper()[:get_cols()], "OFFLINE", "")]
             return [format_lines("APP ERROR", app_id.upper()[:get_cols()], str(e)[:get_cols()])]
 
@@ -1478,16 +1452,6 @@ load_installed_plugins()
 #  PLAYLIST LOOP
 # ============================================================
 
-current_playlist = []
-loop_delay  = 5
-stop_event  = threading.Event()
-last_sent_page = None
-active_app  = None
-active_app_playlist = None
-app_playlist_loop = True
-app_playlist_name = None
-last_transition_style = 'ltr'
-last_transition_speed = 15
 
 # ── Notification Interrupts ────────────────────────────────
 _notify_queue = []
@@ -1496,7 +1460,7 @@ _notify_lock  = threading.Lock()
 
 def _pop_notify():
     """Return and remove the oldest non-expired notification, or None."""
-    if _quiet_hours_active:
+    if state.quiet_hours_active:
         return None
     now = time.time()
     with _notify_lock:
@@ -1509,35 +1473,32 @@ def _pop_notify():
 
 def _show_notify_message(msg):
     """Display a notification for its display_seconds, then return."""
-    global last_sent_page
     text = msg.get('text', '')
     secs = float(msg.get('display_seconds', settings.get('notify_display_seconds', 10)))
     order = get_animation_order(msg.get('animation', 'ltr'))
     max_dist = send_to_display(format_lines(*text.split('|')), order)
-    last_sent_page = text
+    state.last_sent_page = text
     rotation_time = _rotation_time(max_dist)
     for _ in range(int(rotation_time * 10)):
-        if stop_event.is_set(): return
+        if state.stop_event.is_set(): return
         time.sleep(0.1)
     for _ in range(int(secs * 10)):
-        if stop_event.is_set(): return
+        if state.stop_event.is_set(): return
         time.sleep(0.1)
 
 
 def _run_app_playlist():
     """Execute one pass through the app playlist entries."""
-    global active_app_playlist, active_app, last_sent_page
-    global last_transition_style, last_transition_speed
 
-    entries = active_app_playlist
+    entries = state.active_app_playlist
     if not entries:
-        active_app_playlist = None
+        state.active_app_playlist = None
         return
 
     while True:
         for entry in entries:
-            if stop_event.is_set():
-                stop_event.clear()
+            if state.stop_event.is_set():
+                state.stop_event.clear()
                 return
 
             etype = entry.get('type', 'app')
@@ -1550,17 +1511,17 @@ def _run_app_playlist():
                 speed = int(entry.get('speed', 15))
                 order = get_animation_order(style)
                 max_dist = send_to_display(text, order, step_delay_ms=speed)
-                last_sent_page = text
+                state.last_sent_page = text
                 # Wait for rotation + duration
                 rotation_time = _rotation_time(max_dist)
                 for _ in range(int(rotation_time * 10)):
-                    if stop_event.is_set():
-                        stop_event.clear()
+                    if state.stop_event.is_set():
+                        state.stop_event.clear()
                         return
                     time.sleep(0.1)
                 for _ in range(int(duration * 10)):
-                    if stop_event.is_set():
-                        stop_event.clear()
+                    if state.stop_event.is_set():
+                        state.stop_event.clear()
                         return
                     time.sleep(0.1)
 
@@ -1569,13 +1530,13 @@ def _run_app_playlist():
                 if not app_key:
                     continue
                 # Temporarily set active_app so existing fetch logic works
-                active_app = app_key
+                state.active_app = app_key
                 deadline = time.time() + duration
 
                 while time.time() < deadline:
-                    if stop_event.is_set():
-                        active_app = None
-                        stop_event.clear()
+                    if state.stop_event.is_set():
+                        state.active_app = None
+                        state.stop_event.clear()
                         return
 
                     display_pages = _get_pages_for_app(app_key)
@@ -1602,7 +1563,7 @@ def _run_app_playlist():
                         active_order = get_animation_order(settings.get('anim_style', 'ltr'))
 
                     for page in display_pages:
-                        if stop_event.is_set() or time.time() >= deadline:
+                        if state.stop_event.is_set() or time.time() >= deadline:
                             break
                         page_text = page.get('text', '') if isinstance(page, dict) else page
                         page_style = page.get('style') if isinstance(page, dict) else None
@@ -1613,25 +1574,25 @@ def _run_app_playlist():
                         eff_style_ap = (anim_style_ap or page_style or
                                         (settings.get(f'plugin_{reg}_transition_style') if reg else None) or
                                         settings.get('transition_style', 'ltr'))
-                        last_transition_style = eff_style_ap
-                        last_transition_speed = page_speed if page_speed is not None else int(settings.get('transition_speed', 15))
-                        if is_anim or page_text != last_sent_page:
+                        state.last_transition_style = eff_style_ap
+                        state.last_transition_speed = page_speed if page_speed is not None else int(settings.get('transition_speed', 15))
+                        if is_anim or page_text != state.last_sent_page:
                             max_dist = _send_with_effect(page_text, page_style if not is_anim else anim_style_ap, page_speed, is_anim, app_id=reg)
-                            last_sent_page = page_text
+                            state.last_sent_page = page_text
 
                         rotation_time = _rotation_time(max_dist)
                         for _ in range(int(rotation_time * 10)):
-                            if stop_event.is_set() or time.time() >= deadline: break
+                            if state.stop_event.is_set() or time.time() >= deadline: break
                             time.sleep(0.1)
                         for _ in range(int(page_delay * 10)):
-                            if stop_event.is_set() or time.time() >= deadline: break
+                            if state.stop_event.is_set() or time.time() >= deadline: break
                             time.sleep(0.1)
 
-                active_app = None
+                state.active_app = None
 
         # After all entries
-        if not app_playlist_loop:
-            active_app_playlist = None
+        if not state.app_playlist_loop:
+            state.active_app_playlist = None
             return
         # Otherwise loop continues
 
@@ -1650,8 +1611,6 @@ def _get_pages_for_app(app_key):
 #  SCHEDULER + QUIET HOURS
 # ============================================================
 
-_active_schedule_id = None
-_quiet_hours_active = False
 
 
 def _in_time_window(start, end, t):
@@ -1676,25 +1635,22 @@ def _is_quiet_hours():
 
 
 def _schedule_tick():
-    global _active_schedule_id, _quiet_hours_active
-    global active_app, active_app_playlist, app_playlist_loop, app_playlist_name
-    global current_playlist, last_sent_page, loop_delay
 
     quiet = _is_quiet_hours()
 
     # Quiet hours transition: entering
-    if quiet and not _quiet_hours_active:
-        _quiet_hours_active = True
-        active_app = None
-        active_app_playlist = None
-        stop_event.set()
+    if quiet and not state.quiet_hours_active:
+        state.quiet_hours_active = True
+        state.active_app = None
+        state.active_app_playlist = None
+        state.stop_event.set()
         mqtt_publish_state()
         logging.info("Quiet hours: display stopped")
         return
 
     # Quiet hours transition: leaving
-    if not quiet and _quiet_hours_active:
-        _quiet_hours_active = False
+    if not quiet and state.quiet_hours_active:
+        state.quiet_hours_active = False
         logging.info("Quiet hours ended")
         # Fall through to check schedules
 
@@ -1718,10 +1674,10 @@ def _schedule_tick():
             break
 
     new_id = matched['id'] if matched else None
-    if new_id == _active_schedule_id:
+    if new_id == state.active_schedule_id:
         return  # no change
 
-    _active_schedule_id = new_id
+    state.active_schedule_id = new_id
     if matched is None:
         logging.info("Schedule: no active schedule")
         return  # schedule ended — don't force stop, let user's state persist
@@ -1731,9 +1687,9 @@ def _schedule_tick():
     name = matched.get('name', '')
 
     if atype == 'off':
-        active_app = None
-        active_app_playlist = None
-        stop_event.set()
+        state.active_app = None
+        state.active_app_playlist = None
+        state.stop_event.set()
         mqtt_publish_state()
         logging.info(f"Schedule '{name}': display off")
 
@@ -1741,11 +1697,11 @@ def _schedule_tick():
         app_id = action.get('value', '')
         if app_id in _plugin_registry:
             manifest = _plugin_registry[app_id]
-            active_app = app_id
-            active_app_playlist = None
+            state.active_app = app_id
+            state.active_app_playlist = None
             saved = settings.get(f'plugin_{app_id}_loop_delay', '')
-            loop_delay = float(saved) if saved else float(manifest.get('loop_delay', settings.get('global_loop_delay', 5)))
-            stop_event.set()
+            state.loop_delay = float(saved) if saved else float(manifest.get('loop_delay', settings.get('global_loop_delay', 5)))
+            state.stop_event.set()
             mqtt_publish_state()
             logging.info(f"Schedule '{name}': started app {app_id}")
 
@@ -1754,13 +1710,13 @@ def _schedule_tick():
         playlists = settings.get('saved_app_playlists', {})
         if pl_name in playlists:
             pl = playlists[pl_name]
-            active_app_playlist = pl.get('entries', [])
-            app_playlist_loop = pl.get('loop', True)
-            app_playlist_name = pl_name
-            active_app = None
-            current_playlist = []
-            last_sent_page = None
-            stop_event.set()
+            state.active_app_playlist = pl.get('entries', [])
+            state.app_playlist_loop = pl.get('loop', True)
+            state.app_playlist_name = pl_name
+            state.active_app = None
+            state.current_playlist = []
+            state.last_sent_page = None
+            state.stop_event.set()
             mqtt_publish_state()
             logging.info(f"Schedule '{name}': started playlist '{pl_name}'")
 
@@ -1775,9 +1731,6 @@ _start_background_task(_schedule_loop)
 _start_background_task(_schedule_tick)
 
 def playlist_loop():
-    global current_playlist, loop_delay, last_sent_page, active_app
-    global active_app_playlist, app_playlist_loop
-    global last_transition_style, last_transition_speed
 
     while True:
         now = time.time()
@@ -1785,37 +1738,37 @@ def playlist_loop():
         active_order  = None   # custom module send order for this cycle
 
         # ── App playlist mode ─────────────────────────────
-        if active_app_playlist is not None:
+        if state.active_app_playlist is not None:
             _run_app_playlist()
             continue
 
         # ── No active app — use compose playlist ──────────
-        if active_app is None:
-            display_pages = current_playlist
+        if state.active_app is None:
+            display_pages = state.current_playlist
 
         # ── Plugin-based apps ─────────────────────────────
-        elif active_app in _plugin_registry:
-            manifest = _plugin_registry[active_app]
-            display_pages = get_plugin_pages(active_app)
+        elif state.active_app in _plugin_registry:
+            manifest = _plugin_registry[state.active_app]
+            display_pages = get_plugin_pages(state.active_app)
             if manifest.get('animation'):
                 active_order = get_animation_order(settings.get('anim_style', 'ltr'))
 
-        elif active_app.startswith('plugin_') and active_app[7:] in _plugin_registry:
-            plugin_id = active_app[7:]
+        elif state.active_app.startswith('plugin_') and state.active_app[7:] in _plugin_registry:
+            plugin_id = state.active_app[7:]
             manifest = _plugin_registry[plugin_id]
             display_pages = get_plugin_pages(plugin_id)
             if manifest.get('animation'):
                 active_order = get_animation_order(settings.get('anim_style', 'ltr'))
 
         else:
-            display_pages = current_playlist
+            display_pages = state.current_playlist
 
         if not display_pages:
             time.sleep(1)
             continue
 
         # Resolve plugin_ prefix for registry lookups
-        reg_key = active_app[7:] if (active_app and active_app.startswith('plugin_')) else active_app
+        reg_key = state.active_app[7:] if (state.active_app and state.active_app.startswith('plugin_')) else state.active_app
 
         is_anim = (reg_key is not None and reg_key.startswith('anim_')) or \
                   (reg_key in _plugin_registry and _plugin_registry[reg_key].get('animation'))
@@ -1831,10 +1784,10 @@ def playlist_loop():
             default = float(manifest.get('loop_delay', settings.get('global_loop_delay', 5)))
             eff_delay = float(saved) if saved else default
         else:
-            eff_delay = float(settings.get('global_loop_delay', loop_delay))
+            eff_delay = float(settings.get('global_loop_delay', state.loop_delay))
 
         for page in display_pages:
-            if stop_event.is_set():
+            if state.stop_event.is_set():
                 break
 
             # Resolve per-page settings — rich playlist objects vs. plain strings
@@ -1856,22 +1809,22 @@ def playlist_loop():
                         (settings.get(f'plugin_{reg_key}_transition_style') if reg_key else None) or \
                         settings.get('transition_style', 'ltr')
             eff_speed = page_speed if page_speed is not None else int(settings.get('transition_speed', 15))
-            last_transition_style = eff_style
-            last_transition_speed = eff_speed
-            if is_anim or page_text != last_sent_page:
+            state.last_transition_style = eff_style
+            state.last_transition_speed = eff_speed
+            if is_anim or page_text != state.last_sent_page:
                 max_dist = _send_with_effect(page_text, anim_style or page_style, page_speed, is_anim, app_id=reg_key)
-                last_sent_page = page_text
+                state.last_sent_page = page_text
 
             # Skip rotation wait if manifest opts out (e.g. continuous random spin)
             skip_rot = reg_key in _plugin_registry and _plugin_registry[reg_key].get('skip_rotation_wait')
             if not skip_rot:
                 rotation_time = _rotation_time(max_dist)
                 for _ in range(int(rotation_time * 10)):
-                    if stop_event.is_set(): break
+                    if state.stop_event.is_set(): break
                     time.sleep(0.1)
 
             for _ in range(int(page_delay * 10)):
-                if stop_event.is_set(): break
+                if state.stop_event.is_set(): break
                 time.sleep(0.1)
 
             # Check for notification interrupts between pages
@@ -1880,8 +1833,8 @@ def playlist_loop():
                 if msg:
                     _show_notify_message(msg)
 
-        if stop_event.is_set():
-            stop_event.clear()
+        if state.stop_event.is_set():
+            state.stop_event.clear()
 
 
 _start_background_task(playlist_loop)
@@ -1897,15 +1850,14 @@ def apply_auto_home_on_boot():
     Re-asserts the firmware flag either way — it lives in module RAM and is
     lost on power cycle — then homes when enabled. Returns whether it homed.
     """
-    global is_homed, current_indices, current_display_string
     enabled = bool(settings.get('auto_home', True))
     send_raw(f"m**a{1 if enabled else 0}")
     if not enabled:
         return False
     send_raw("m**h")
-    is_homed = True
-    current_indices = [0] * get_module_count()
-    current_display_string = " " * get_module_count()
+    state.is_homed = True
+    state.current_indices = [0] * get_module_count()
+    state.current_display_string = " " * get_module_count()
     mqtt_publish_state()
     logging.info("Auto-home on boot: homed all modules")
     return True
@@ -1939,7 +1891,7 @@ _trigger_failures = {}  # trigger_id → consecutive failure count
 def _check_triggers():
     if not settings.get('triggers_enabled', True):
         return
-    if _quiet_hours_active:
+    if state.quiet_hours_active:
         return
     now = time.time()
     for trig in settings.get('triggers', []):
@@ -2017,26 +1969,24 @@ def index():
 
 @app.route('/current_state')
 def current_state():
-    return jsonify(is_homed=is_homed, state=current_display_string, active_app=active_app,
-                   active_app_playlist=active_app_playlist is not None,
-                   app_playlist_name=app_playlist_name,
-                   rows=get_rows(), cols=get_cols(), sim_mode=sim_mode, hardware_connected=ser is not None,
-                   transition_style=last_transition_style,
-                   transition_speed=last_transition_speed)
+    return jsonify(is_homed=state.is_homed, state=state.current_display_string, active_app=state.active_app,
+                   active_app_playlist=state.active_app_playlist is not None,
+                   app_playlist_name=state.app_playlist_name,
+                   rows=get_rows(), cols=get_cols(), sim_mode=state.sim_mode, hardware_connected=state.ser is not None,
+                   transition_style=state.last_transition_style,
+                   transition_speed=state.last_transition_speed)
 
 @app.route('/grid_config')
 def grid_config():
-    return jsonify(rows=get_rows(), cols=get_cols(), total=get_module_count(), sim_mode=sim_mode)
+    return jsonify(rows=get_rows(), cols=get_cols(), total=get_module_count(), sim_mode=state.sim_mode)
 
 @app.route('/toggle_sim', methods=['POST'])
 def toggle_sim():
-    global sim_mode
-    sim_mode = request.json.get('enabled', True)
-    return jsonify(sim_mode=sim_mode)
+    state.sim_mode = request.json.get('enabled', True)
+    return jsonify(sim_mode=state.sim_mode)
 
 @app.route('/settings', methods=['GET', 'POST'])
 def handle_settings():
-    global is_homed, current_indices, current_display_string
     if request.method == 'POST':
         data   = request.json
         action = data.get('action')
@@ -2067,24 +2017,24 @@ def handle_settings():
 
         if action == 'home_one':
             send_raw(f"m{int(mod_id):02d}h")
-            current_indices[int(mod_id)] = 0
-            sl = list(current_display_string.ljust(get_module_count()))
+            state.current_indices[int(mod_id)] = 0
+            sl = list(state.current_display_string.ljust(get_module_count()))
             sl[int(mod_id)] = ' '
-            current_display_string = "".join(sl)
+            state.current_display_string = "".join(sl)
             return jsonify(status="Homing")
 
         if action == 'calibrate':
             with serial_lock:
-                if ser:
-                    ser.reset_input_buffer()
-                    ser.write(f"m{int(mod_id):02d}c\n".encode())
-                    ser.flush()
+                if state.ser:
+                    state.ser.reset_input_buffer()
+                    state.ser.write(f"m{int(mod_id):02d}c\n".encode())
+                    state.ser.flush()
                     start_wait = time.time()
                     buffer = ""
                     target = f"m{int(mod_id):02d}:"
                     while (time.time() - start_wait) < 45.0:
-                        if ser.in_waiting > 0:
-                            chunk = ser.read(ser.in_waiting).decode('utf-8', errors='ignore')
+                        if state.ser.in_waiting > 0:
+                            chunk = state.ser.read(state.ser.in_waiting).decode('utf-8', errors='ignore')
                             buffer += chunk
                             if target in buffer and '\n' in buffer[buffer.find(target):]:
                                 valid_part = buffer[buffer.find(target):].split('\n')[0]
@@ -2092,8 +2042,8 @@ def handle_settings():
                                     val = int(valid_part.split(target)[1])
                                     settings['calibrations'][mod_id] = val
                                     save_settings(settings)
-                                    ser.write(f"m{int(mod_id):02d}t{val}\n".encode())
-                                    ser.flush()
+                                    state.ser.write(f"m{int(mod_id):02d}t{val}\n".encode())
+                                    state.ser.flush()
                                     return jsonify(status="success", steps=val)
                                 except:
                                     pass
@@ -2103,7 +2053,6 @@ def handle_settings():
 
 @app.route('/custom_tune', methods=['POST'])
 def custom_tune():
-    global current_indices, current_display_string
     data   = request.json
     action = data.get('action')
     mod_id = int(data.get('id', 0))
@@ -2113,10 +2062,10 @@ def custom_tune():
         idx  = int(data.get('index', 0))
         send_raw(f"m{mod_id:02d}g{step}")
         if 0 <= idx < len(get_flap_chars()):
-            current_indices[mod_id] = idx
-            sl = list(current_display_string.ljust(get_module_count()))
+            state.current_indices[mod_id] = idx
+            sl = list(state.current_display_string.ljust(get_module_count()))
             sl[mod_id] = get_flap_chars()[idx]
-            current_display_string = "".join(sl)
+            state.current_display_string = "".join(sl)
 
     elif action == 'save':
         idx  = int(data.get('index', 0))
@@ -2166,58 +2115,54 @@ def toggle_autohome():
 
 @app.route('/update_playlist', methods=['POST'])
 def update_playlist():
-    global current_playlist, loop_delay, last_sent_page, active_app, active_app_playlist
     data             = request.json
-    current_playlist = data.get('pages', [])
-    loop_delay       = data.get('delay', 5)
-    last_sent_page   = None
-    active_app       = None
-    active_app_playlist = None
-    stop_event.set()
+    state.current_playlist = data.get('pages', [])
+    state.loop_delay       = data.get('delay', 5)
+    state.last_sent_page   = None
+    state.active_app       = None
+    state.active_app_playlist = None
+    state.stop_event.set()
     mqtt_publish_state()
     return jsonify(status="success")
 
 @app.route('/run_app', methods=['POST'])
 def run_app():
-    global active_app, loop_delay, active_app_playlist
-    active_app_playlist = None
-    active_app   = request.json.get('app')
+    state.active_app_playlist = None
+    state.active_app   = request.json.get('app')
 
     # Resolve plugin_ prefix
-    registry_key = active_app[7:] if active_app and active_app.startswith('plugin_') else active_app
+    registry_key = state.active_app[7:] if state.active_app and state.active_app.startswith('plugin_') else state.active_app
 
     # Use loop_delay from user settings, then manifest, then global default
     if registry_key in _plugin_registry:
         manifest = _plugin_registry[registry_key]
         if manifest.get('animation'):
-            loop_delay = max(0.1, float(settings.get('anim_speed', '0.4')))
+            state.loop_delay = max(0.1, float(settings.get('anim_speed', '0.4')))
         else:
             saved = settings.get(f'plugin_{registry_key}_loop_delay', '')
             default = float(manifest.get('loop_delay', settings.get('global_loop_delay', 5)))
-            loop_delay = float(saved) if saved else default
+            state.loop_delay = float(saved) if saved else default
     else:
-        loop_delay = float(settings.get('global_loop_delay', 5))
+        state.loop_delay = float(settings.get('global_loop_delay', 5))
 
-    stop_event.set()
+    state.stop_event.set()
     mqtt_publish_state()
-    return jsonify(status=f"App {active_app} started")
+    return jsonify(status=f"App {state.active_app} started")
 
 @app.route('/stop_app', methods=['POST'])
 def stop_app():
-    global active_app, active_app_playlist
-    active_app = None
-    active_app_playlist = None
-    stop_event.set()
+    state.active_app = None
+    state.active_app_playlist = None
+    state.stop_event.set()
     mqtt_publish_state()
     return jsonify(status="stopped")
 
 @app.route('/home_all')
 def home_all():
-    global is_homed, current_indices, current_display_string
     send_raw("m**h")
-    is_homed = True
-    current_indices = [0] * get_module_count()
-    current_display_string = " " * get_module_count()
+    state.is_homed = True
+    state.current_indices = [0] * get_module_count()
+    state.current_display_string = " " * get_module_count()
     return jsonify(status="Homing All")
 
 
@@ -2227,15 +2172,14 @@ def home_all():
 
 @app.route('/auto_tune', methods=['POST'])
 def auto_tune_route():
-    global is_homed, current_indices, current_display_string
     data   = request.json
     action = data.get('action')
 
     if action == 'home':
         send_raw("m**h")
-        is_homed = True
-        current_indices = [0] * get_module_count()
-        current_display_string = " " * get_module_count()
+        state.is_homed = True
+        state.current_indices = [0] * get_module_count()
+        state.current_display_string = " " * get_module_count()
         return jsonify(status="ok")
 
     elif action == 'goto_char':
@@ -2374,7 +2318,7 @@ def restore_settings():
     if 'tuned_chars'  in data: settings['tuned_chars'].update(data['tuned_chars'])
     save_settings(settings)
     hw = False
-    if ser:
+    if state.ser:
         hw = True
         for i in range(get_module_count()):
             s = str(i)
@@ -2447,8 +2391,7 @@ def schedules_route():
 @app.route('/schedule_tick', methods=['POST'])
 def schedule_tick_route():
     """Force an immediate schedule evaluation (e.g. after saving schedules)."""
-    global _active_schedule_id
-    _active_schedule_id = None  # reset so current window re-fires
+    state.active_schedule_id = None  # reset so current window re-fires
     threading.Thread(target=_schedule_tick, daemon=True).start()
     return jsonify(status="ok")
 
@@ -2459,15 +2402,14 @@ def schedule_tick_route():
 
 @app.route('/run_app_playlist', methods=['POST'])
 def run_app_playlist():
-    global active_app_playlist, app_playlist_loop, active_app, current_playlist, last_sent_page, app_playlist_name
     data = request.json
-    active_app_playlist = data.get('entries', [])
-    app_playlist_loop = data.get('loop', True)
-    app_playlist_name = data.get('name', None)
-    active_app = None
-    current_playlist = []
-    last_sent_page = None
-    stop_event.set()
+    state.active_app_playlist = data.get('entries', [])
+    state.app_playlist_loop = data.get('loop', True)
+    state.app_playlist_name = data.get('name', None)
+    state.active_app = None
+    state.current_playlist = []
+    state.last_sent_page = None
+    state.stop_event.set()
     mqtt_publish_state()
     return jsonify(status="App playlist started")
 
@@ -2527,7 +2469,6 @@ def app_library():
 
 @app.route('/app_library/install', methods=['POST'])
 def app_library_install():
-    global active_app
     app_id = request.json.get("id", "").strip()
     if not app_id:
         return jsonify(status="error", message="No app ID"), 400
@@ -2583,13 +2524,12 @@ def app_library_install():
 
 @app.route('/app_library/uninstall', methods=['POST'])
 def app_library_uninstall():
-    global active_app
     app_id = request.json.get("id", "").strip()
     if not app_id:
         return jsonify(status="error", message="No app ID"), 400
-    if active_app in (app_id, f"plugin_{app_id}"):
-        active_app = None
-        stop_event.set()
+    if state.active_app in (app_id, f"plugin_{app_id}"):
+        state.active_app = None
+        state.stop_event.set()
     # Remove from installed_apps list (keep files)
     installed = settings.get('installed_apps', [])
     if app_id in installed:
@@ -2792,37 +2732,34 @@ def crypto_search_route():
 #  NETWORK STATUS
 # ============================================================
 
-_network_mode = 'unknown'
-_is_online = False
 
 def _check_network():
     """Detect network mode and internet connectivity."""
-    global _network_mode, _is_online
     # Check mode file written by network-check.sh
     try:
         with open('/tmp/splitflap-network-mode', 'r') as f:
-            _network_mode = f.read().strip()
+            state.network_mode = f.read().strip()
     except FileNotFoundError:
-        _network_mode = 'wifi'  # assume normal if no file (dev mode)
+        state.network_mode = 'wifi'  # assume normal if no file (dev mode)
 
     # Check internet connectivity
     try:
         requests.get('https://httpbin.org/status/200', timeout=3)
-        _is_online = True
+        state.is_online = True
     except Exception:
-        _is_online = False
+        state.is_online = False
 
     # Publish network state via MQTT
     _mqtt_publish_network()
 
 def check_online():
     """Return cached online status. Refreshed periodically."""
-    return _is_online
+    return state.is_online
 
 
 def _mqtt_publish_network():
     """Publish network status to MQTT."""
-    if not mqtt_client or not mqtt_client.is_connected():
+    if not state.mqtt_client or not state.mqtt_client.is_connected():
         return
     import subprocess
     ip = '?'
@@ -2834,14 +2771,14 @@ def _mqtt_publish_network():
         pass
     try:
         result = subprocess.run(['iwgetid', '-r'], capture_output=True, text=True, timeout=2)
-        ssid = result.stdout.strip() or ('SplitflapOS' if _network_mode == 'hotspot' else '?')
+        ssid = result.stdout.strip() or ('SplitflapOS' if state.network_mode == 'hotspot' else '?')
     except Exception:
-        if _network_mode == 'hotspot':
+        if state.network_mode == 'hotspot':
             ssid = settings.get('hotspot_ssid', 'SplitflapOS')
-    mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/network/mode", _network_mode, retain=True)
-    mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/network/ssid", ssid, retain=True)
-    mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/network/ip", ip, retain=True)
-    mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/network/online", "ON" if _is_online else "OFF", retain=True)
+    state.mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/network/mode", state.network_mode, retain=True)
+    state.mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/network/ssid", ssid, retain=True)
+    state.mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/network/ip", ip, retain=True)
+    state.mqtt_client.publish(f"{MQTT_TOPIC_PREFIX}/network/online", "ON" if state.is_online else "OFF", retain=True)
 
 
 # Initial check on startup
@@ -2876,11 +2813,11 @@ def network_status():
         pass
     try:
         result = subprocess.run(['iwgetid', '-r'], capture_output=True, text=True, timeout=2)
-        ssid = result.stdout.strip() or ('SplitflapOS' if _network_mode == 'hotspot' else '?')
+        ssid = result.stdout.strip() or ('SplitflapOS' if state.network_mode == 'hotspot' else '?')
     except Exception:
-        if _network_mode == 'hotspot':
+        if state.network_mode == 'hotspot':
             ssid = settings.get('hotspot_ssid', 'SplitflapOS')
-    return jsonify(mode=_network_mode, online=_is_online, ip=ip, ssid=ssid)
+    return jsonify(mode=state.network_mode, online=state.is_online, ip=ip, ssid=ssid)
 
 @app.route('/network_config', methods=['POST'])
 def network_config():

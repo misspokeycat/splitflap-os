@@ -27,6 +27,7 @@ if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
 import app  # noqa: E402
+from splitflap.state import resize_grid, state  # noqa: E402
 
 SOURCE = (SERVER_DIR / "app.py").read_text(encoding="utf-8")
 
@@ -71,41 +72,39 @@ class FakeMessage:
 
 
 class SplitflapTestCase(unittest.TestCase):
-    """Snapshots the module globals a test may mutate and puts them back.
+    """Snapshots the shared runtime state a test may mutate and puts it back.
 
-    The server keeps its runtime state in module globals shared between the
-    request handlers and the background loops, so without this every test
-    leaks into the next one.
+    The display loop, the scheduler and the request handlers all read and
+    write one RuntimeState instance, so without this every test leaks into
+    the next one.
     """
 
-    STATE = (
-        "mqtt_client", "mqtt_last_text", "is_homed", "sim_mode",
-        "current_indices", "current_display_string", "current_playlist",
-        "last_sent_page", "active_app", "active_app_playlist",
-        "app_playlist_name", "app_playlist_loop", "loop_delay", "send_raw",
-        "_notify_queue", "_crypto_cache",
-    )
-
     def setUp(self):
-        self._saved = {name: getattr(app, name) for name in self.STATE}
+        self._saved_state = {
+            k: copy.copy(v) if isinstance(v, (list, dict, set)) else v
+            for k, v in vars(state).items()
+        }
         # settings is one dict shared by every module, so it has to be
-        # snapshotted and restored in place — rebinding app.settings would
-        # leave splitflap.grid and friends reading the original.
+        # snapshotted and restored in place — rebinding it would leave
+        # splitflap.grid and friends reading the original.
         self._saved_settings = copy.deepcopy(app.settings)
+        self._saved_send_raw = app.send_raw
+
         self.client = FakeMqttClient()
-        app.mqtt_client = self.client
+        state.mqtt_client = self.client
         self.sent = []
         app.send_raw = self.sent.append
 
     def tearDown(self):
-        for name, value in self._saved.items():
-            setattr(app, name, value)
+        vars(state).clear()
+        vars(state).update(self._saved_state)
         app.settings.clear()
         app.settings.update(self._saved_settings)
-        app.stop_event.clear()
-        app.resize_grid()
+        app.send_raw = self._saved_send_raw
+        state.stop_event.clear()
+        resize_grid()
 
     def set_grid(self, rows, cols):
         app.settings["sim_rows"] = rows
         app.settings["sim_cols"] = cols
-        app.resize_grid()
+        resize_grid()

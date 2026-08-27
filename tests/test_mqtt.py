@@ -2,7 +2,14 @@
 
 import unittest
 
-from support import SOURCE, FakeMessage, FakeMqttClient, SplitflapTestCase, app
+from support import (
+    SOURCE,
+    FakeMessage,
+    FakeMqttClient,
+    SplitflapTestCase,
+    app,
+    state,
+)
 
 
 class TextCapacityTests(SplitflapTestCase):
@@ -94,15 +101,15 @@ class TextLayoutTests(SplitflapTestCase):
     def test_text_command_renders_a_page_and_clears_the_active_app(self):
         self.set_grid(3, 15)
         app.settings["mqtt_center"] = True
-        app.active_app = "time"
-        app.active_app_playlist = ["time"]
+        state.active_app = "time"
+        state.active_app_playlist = ["time"]
 
         app._mqtt_on_message(self.client, None, FakeMessage(app.MQTT_TEXT_CMD, "HI|THERE"))
 
-        self.assertIsNone(app.active_app)
-        self.assertIsNone(app.active_app_playlist)
-        self.assertEqual(app.current_playlist, [app._mqtt_format_text("HI|THERE")])
-        self.assertEqual(len(app.current_playlist[0]), app.get_module_count())
+        self.assertIsNone(state.active_app)
+        self.assertIsNone(state.active_app_playlist)
+        self.assertEqual(state.current_playlist, [app._mqtt_format_text("HI|THERE")])
+        self.assertEqual(len(state.current_playlist[0]), app.get_module_count())
 
 
 class StatePublishTests(SplitflapTestCase):
@@ -124,9 +131,9 @@ class StatePublishTests(SplitflapTestCase):
         self.assertTrue(retained[app.MQTT_STATUS_STATE])
 
     def test_nothing_is_published_while_disconnected(self):
-        app.mqtt_client = FakeMqttClient(connected=False)
+        state.mqtt_client = FakeMqttClient(connected=False)
         app.mqtt_publish_state()
-        self.assertEqual(app.mqtt_client.published, [])
+        self.assertEqual(state.mqtt_client.published, [])
 
 
 class HomeButtonTests(SplitflapTestCase):
@@ -137,9 +144,9 @@ class HomeButtonTests(SplitflapTestCase):
     def setUp(self):
         super().setUp()
         self.set_grid(3, 15)
-        app.is_homed = False
-        app.current_indices = [7] * app.get_module_count()
-        app.current_display_string = "X" * app.get_module_count()
+        state.is_homed = False
+        state.current_indices = [7] * app.get_module_count()
+        state.current_display_string = "X" * app.get_module_count()
 
     def home(self):
         app._mqtt_on_message(
@@ -148,20 +155,20 @@ class HomeButtonTests(SplitflapTestCase):
 
     def test_home_command_updates_the_module_state(self):
         self.home()
-        self.assertTrue(app.is_homed)
-        self.assertEqual(app.current_indices, [0] * app.get_module_count())
-        self.assertEqual(app.current_display_string, " " * app.get_module_count())
+        self.assertTrue(state.is_homed)
+        self.assertEqual(state.current_indices, [0] * app.get_module_count())
+        self.assertEqual(state.current_display_string, " " * app.get_module_count())
 
     def test_home_command_sends_the_home_instruction(self):
         self.home()
         self.assertEqual(self.sent, ["m**h"])
 
     def test_home_command_stops_the_running_app(self):
-        app.active_app = "time"
-        app.active_app_playlist = ["time"]
+        state.active_app = "time"
+        state.active_app_playlist = ["time"]
         self.home()
-        self.assertIsNone(app.active_app)
-        self.assertIsNone(app.active_app_playlist)
+        self.assertIsNone(state.active_app)
+        self.assertIsNone(state.active_app_playlist)
 
 
 class AutoHomeOnBootTests(SplitflapTestCase):
@@ -171,24 +178,24 @@ class AutoHomeOnBootTests(SplitflapTestCase):
     def setUp(self):
         super().setUp()
         self.set_grid(3, 15)
-        app.is_homed = False
-        app.current_indices = [7] * app.get_module_count()
-        app.current_display_string = "X" * app.get_module_count()
+        state.is_homed = False
+        state.current_indices = [7] * app.get_module_count()
+        state.current_display_string = "X" * app.get_module_count()
 
     def test_homes_when_enabled(self):
         app.settings["auto_home"] = True
         self.assertTrue(app.apply_auto_home_on_boot())
         self.assertEqual(self.sent, ["m**a1", "m**h"])
-        self.assertTrue(app.is_homed)
-        self.assertEqual(app.current_indices, [0] * app.get_module_count())
-        self.assertEqual(app.current_display_string, " " * app.get_module_count())
+        self.assertTrue(state.is_homed)
+        self.assertEqual(state.current_indices, [0] * app.get_module_count())
+        self.assertEqual(state.current_display_string, " " * app.get_module_count())
 
     def test_reasserts_the_firmware_flag_without_homing_when_disabled(self):
         app.settings["auto_home"] = False
         self.assertFalse(app.apply_auto_home_on_boot())
         self.assertEqual(self.sent, ["m**a0"])
-        self.assertFalse(app.is_homed)
-        self.assertEqual(app.current_display_string, "X" * app.get_module_count())
+        self.assertFalse(state.is_homed)
+        self.assertEqual(state.current_display_string, "X" * app.get_module_count())
 
     def test_homing_is_reported_over_mqtt(self):
         app.settings["auto_home"] = True
@@ -219,26 +226,32 @@ class ConnectSequenceTests(SplitflapTestCase):
         # and the playlist globals. A fast broker could fire on_connect before
         # they existed, and the resulting NameError killed the whole discovery
         # publish, so no entities appeared in Home Assistant at all.
+        #
+        # The playlist half is now structurally safe: that state lives on
+        # splitflap.state, imported at the top of app.py. The plugin registry
+        # is still module-level, so it still needs guarding.
         connect_at = SOURCE.index("if BACKGROUND_TASKS:\n    mqtt_setup()")
-        for definition in ("\n_plugin_registry = {}",
-                           "\nactive_app  = None",
-                           "\napp_playlist_name = None"):
+        for definition in ("\n_plugin_registry = {}", "\nload_installed_plugins()"):
             self.assertLess(
                 SOURCE.index(definition), connect_at,
-                f"mqtt_setup() runs before {definition.strip()} is defined",
+                f"mqtt_setup() runs before {definition.strip()}",
             )
+
+    def test_discovery_options_read_the_populated_plugin_registry(self):
+        # The failure mode this guards: discovery publishing an empty app list.
+        self.assertIn("time", app._get_mqtt_app_options())
 
     def test_setup_is_skipped_when_mqtt_is_disabled(self):
         app.settings["mqtt_enabled"] = False
-        app.mqtt_client = None
+        state.mqtt_client = None
         app.mqtt_setup()
-        self.assertIsNone(app.mqtt_client)
+        self.assertIsNone(state.mqtt_client)
 
     def test_setup_does_not_connect_when_the_setting_is_absent(self):
         app.settings.pop("mqtt_enabled", None)
-        app.mqtt_client = None
+        state.mqtt_client = None
         app.mqtt_setup()
-        self.assertIsNone(app.mqtt_client)
+        self.assertIsNone(state.mqtt_client)
 
 
 if __name__ == "__main__":

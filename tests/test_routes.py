@@ -9,7 +9,7 @@ code behind them is rearranged.
 import unittest
 from unittest import mock
 
-from support import SplitflapTestCase, app
+from support import SplitflapTestCase, app, state
 
 
 # Frozen inventory of the HTTP surface: (rule, endpoint, methods).
@@ -230,14 +230,14 @@ class WriteRouteSmokeTests(RouteSmokeTestCase):
 
     def test_update_playlist_replaces_the_playlist(self):
         self.http.post("/update_playlist", json={"pages": ["ONE", "TWO"], "delay": 3})
-        self.assertEqual(app.current_playlist, ["ONE", "TWO"])
-        self.assertIsNone(app.active_app)
+        self.assertEqual(state.current_playlist, ["ONE", "TWO"])
+        self.assertIsNone(state.active_app)
 
     def test_home_all_marks_the_display_homed(self):
-        app.is_homed = False
+        state.is_homed = False
         self.http.get("/home_all")
-        self.assertTrue(app.is_homed)
-        self.assertEqual(app.current_display_string, " " * app.get_module_count())
+        self.assertTrue(state.is_homed)
+        self.assertEqual(state.current_display_string, " " * app.get_module_count())
 
 
 if __name__ == "__main__":
