@@ -18,6 +18,43 @@ from splitflap.state import state
 _notify_queue = []
 _notify_lock  = threading.Lock()
 
+# A message not shown within this long is stale — the display loop only looks
+# between pages, so a queue can outlive the moment its contents were about.
+EXPIRY_SECONDS = 300
+
+# Belt and braces against a source that pushes faster than the display can
+# ever show. Pruning on push already bounds the queue in normal use.
+MAX_QUEUED = 100
+
+
+def push(text, source, display_seconds=None, animation='ltr'):
+    """Queue a message for the display loop to show between pages.
+
+    Returns the queued message, or None when notification interrupts are
+    switched off. That check lives here because triggers used to enqueue
+    without it while nothing drained the queue, so the list grew for the
+    lifetime of the process.
+    """
+    if not settings.get('notify_enabled', False):
+        return None
+    now = time.time()
+    if display_seconds is None:
+        display_seconds = float(settings.get('notify_display_seconds', 10))
+    msg = {
+        'id': f"msg_{int(now * 1000)}",
+        'text': text,
+        'source': source,
+        'display_seconds': float(display_seconds),
+        'animation': animation,
+        'created_at': now,
+        'expires_at': now + EXPIRY_SECONDS,
+    }
+    with _notify_lock:
+        _notify_queue[:] = [m for m in _notify_queue if m['expires_at'] > now]
+        _notify_queue.append(msg)
+        del _notify_queue[:-MAX_QUEUED]
+    return msg
+
 
 def _pop_notify():
     """Return and remove the oldest non-expired notification, or None."""
@@ -25,7 +62,7 @@ def _pop_notify():
         return None
     now = time.time()
     with _notify_lock:
-        # Prune stale messages (not shown within 5 minutes)
+        # Prune stale messages
         _notify_queue[:] = [m for m in _notify_queue if m['expires_at'] > now]
         if _notify_queue:
             return _notify_queue.pop(0)

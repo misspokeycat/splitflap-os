@@ -9,7 +9,7 @@ broken one backs off instead of hammering the display.
 import logging
 import time
 
-from splitflap.notifications import _notify_lock, _notify_queue
+from splitflap.notifications import push
 from splitflap.plugins import _plugin_registry, _plugin_triggers, get_plugin_pages
 from splitflap.settings import settings
 from splitflap.state import state
@@ -68,17 +68,7 @@ def _check_triggers():
             pages = get_plugin_pages(app_id)
             if pages:
                 text = pages[0] if isinstance(pages[0], str) else pages[0].get('text', '')
-                msg = {
-                    'id': f"trig_{trig_id}_{int(now*1000)}",
-                    'text': text,
-                    'source': f"trigger:{app_id}",
-                    'display_seconds': display_seconds,
-                    'animation': 'ltr',
-                    'created_at': now,
-                    'expires_at': now + 300,
-                }
-                with _notify_lock:
-                    _notify_queue.append(msg)
+                push(text, f"trigger:{app_id}", display_seconds=display_seconds)
                 logging.info(f"Trigger fired: {trig.get('name',trig_id)} ({app_id})")
 
 

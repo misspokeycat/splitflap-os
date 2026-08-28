@@ -4,7 +4,7 @@ import logging
 import time
 from flask import Blueprint, jsonify, request
 from splitflap.settings import settings
-from splitflap.notifications import _notify_lock, _notify_queue
+from splitflap.notifications import _notify_lock, _notify_queue, push
 
 bp = Blueprint("notify", __name__)
 
@@ -33,19 +33,12 @@ def notify_push():
     text = data.get('text', '').strip()
     if not text:
         return jsonify(error='text is required'), 400
-    display_seconds = float(data.get('display_seconds', settings.get('notify_display_seconds', 10)))
-    now = time.time()
-    msg = {
-        'id': f"msg_{int(now * 1000)}",
-        'text': text,
-        'source': source,
-        'display_seconds': display_seconds,
-        'animation': data.get('animation', 'ltr'),
-        'created_at': now,
-        'expires_at': now + 300,  # expire if not shown within 5 minutes
-    }
-    with _notify_lock:
-        _notify_queue.append(msg)
+    msg = push(
+        text,
+        source,
+        display_seconds=data.get('display_seconds'),
+        animation=data.get('animation', 'ltr'),
+    )
     logging.info(f"Notify: {source} pushed '{text[:30]}'")
     return jsonify(id=msg['id'], source=source, position=len(_notify_queue)), 201
 
