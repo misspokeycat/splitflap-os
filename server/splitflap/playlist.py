@@ -102,6 +102,7 @@ def _run_app_playlist():
                         page_speed = int(page.get('speed', 15)) if isinstance(page, dict) else 15
                         page_delay = float(page.get('delay', eff_delay)) if isinstance(page, dict) else eff_delay
 
+                        max_dist = 0
                         anim_style_ap = settings.get('anim_style','ltr') if is_anim else None
                         eff_style_ap = (anim_style_ap or page_style or
                                         (settings.get(f'plugin_{reg}_transition_style') if reg else None) or
