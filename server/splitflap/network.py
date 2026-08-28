@@ -11,7 +11,7 @@ import requests
 from splitflap.settings import settings
 from splitflap.state import state
 from splitflap.mqtt import MQTT_TOPIC_PREFIX
-from splitflap.tasks import start_background_task
+from splitflap.tasks import start_background_task, start_supervised_loop
 
 
 def _check_network():
@@ -71,4 +71,4 @@ def _periodic_network_check():
         time.sleep(60)
         _check_network()
 
-start_background_task(_periodic_network_check)
+start_supervised_loop(_periodic_network_check)

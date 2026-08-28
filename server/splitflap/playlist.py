@@ -16,7 +16,7 @@ from splitflap.notifications import _pop_notify, _show_notify_message
 from splitflap.plugins import _plugin_registry, get_plugin_pages
 from splitflap.settings import settings
 from splitflap.state import state
-from splitflap.tasks import start_background_task
+from splitflap.tasks import start_supervised_loop
 
 
 def _run_app_playlist():
@@ -247,4 +247,4 @@ def playlist_loop():
             state.stop_event.clear()
 
 
-start_background_task(playlist_loop)
+start_supervised_loop(playlist_loop)

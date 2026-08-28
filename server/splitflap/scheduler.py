@@ -15,7 +15,7 @@ from splitflap.mqtt import mqtt_publish_state
 from splitflap.plugins import _plugin_registry
 from splitflap.settings import settings
 from splitflap.state import state
-from splitflap.tasks import start_background_task
+from splitflap.tasks import start_background_task, start_supervised_loop
 
 
 def _in_time_window(start, end, t):
@@ -132,5 +132,5 @@ def _schedule_loop():
         _schedule_tick()
 
 
-start_background_task(_schedule_loop)
+start_supervised_loop(_schedule_loop)
 start_background_task(_schedule_tick)

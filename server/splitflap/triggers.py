@@ -13,7 +13,7 @@ from splitflap.notifications import _notify_lock, _notify_queue
 from splitflap.plugins import _plugin_registry, _plugin_triggers, get_plugin_pages
 from splitflap.settings import settings
 from splitflap.state import state
-from splitflap.tasks import start_background_task
+from splitflap.tasks import start_supervised_loop
 
 
 _trigger_cooldowns = {}  # trigger_id → last_fired timestamp
@@ -88,4 +88,4 @@ def _trigger_loop():
         _check_triggers()
 
 
-start_background_task(_trigger_loop)
+start_supervised_loop(_trigger_loop)
