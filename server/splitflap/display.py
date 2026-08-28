@@ -40,17 +40,37 @@ COLOR_MAP = {
     '\U0001f7e6': 'b', '\U0001f7ea': 'p', '\u2b1c': 'w', '\u2b1b': ' ',
 }
 
+def _prepare_text(text, raw=False):
+    """Normalise text for the modules and fit it to the grid.
+
+    Shared by every sender so a character cannot render correctly under one
+    transition style and blank under another — which is what happened while
+    the currency alias lived in only one of the three.
+
+    raw=True is for animation frames, whose colour codes (r o y g b p w) are
+    already lowercase and must not be uppercased.
+    """
+    clean_text = text if raw else unicodedata.normalize('NFC', text.upper())
+    for emoji, char in COLOR_MAP.items():
+        clean_text = clean_text.replace(emoji, char)
+    # The user's currency character addresses the physical $ flap.
+    currency = settings.get('currency_symbol', '$').strip()
+    if currency and currency != '$':
+        clean_text = clean_text.replace(currency.upper(), '$')
+    # The physical " flap is addressed as 'q' in the default firmware map;
+    # only substitute when " is genuinely absent from the active map.
+    if '"' not in get_flap_chars():
+        clean_text = clean_text.replace('"', 'q')
+    n = get_module_count()
+    return clean_text.ljust(n)[:n]
+
+
 def send_to_display_sync(text):
     """Send modules staggered so all arrive at their target character simultaneously."""
     if not text:
         return 0
-    clean_text = unicodedata.normalize('NFC', text.upper())
-    for emoji, char in COLOR_MAP.items():
-        clean_text = clean_text.replace(emoji, char)
-    if '"' not in get_flap_chars():
-        clean_text = clean_text.replace('"', 'q')
+    clean_text = _prepare_text(text)
     n = get_module_count()
-    clean_text = clean_text.ljust(n)[:n]
     logging.info(f"DISPLAY (sync): {clean_text}")
 
     dists = []
@@ -92,13 +112,8 @@ def send_to_display_slot(text, effect_speed=80):
     """Slot machine: all modules spin to random chars, then lock in L→R."""
     if not text:
         return 0
-    clean_text = unicodedata.normalize('NFC', text.upper())
-    for emoji, char in COLOR_MAP.items():
-        clean_text = clean_text.replace(emoji, char)
-    if '"' not in get_flap_chars():
-        clean_text = clean_text.replace('"', 'q')
+    clean_text = _prepare_text(text)
     n = get_module_count()
-    clean_text = clean_text.ljust(n)[:n]
     logging.info(f"DISPLAY (slot): {clean_text}")
 
     # Phase 1: all modules spin to random intermediate chars simultaneously
@@ -170,25 +185,8 @@ def send_to_display(text, order=None, raw=False, step_delay_ms=15):
     if not text:
         return 0
 
-    # For normal text: uppercase first (emojis are unaffected by upper()),
-    # then replace emojis with color codes. Animation pages pass raw=True to
-    # skip uppercasing so their color codes (r o y g b p w) stay lowercase.
-    if not raw:
-        clean_text = unicodedata.normalize('NFC', text.upper())
-    else:
-        clean_text = text
-    for emoji, char in COLOR_MAP.items():
-        clean_text = clean_text.replace(emoji, char)
-    # Apply currency symbol alias: user's currency char → $ (the physical flap position)
-    currency = settings.get('currency_symbol', '$').strip()
-    if currency and currency != '$':
-        clean_text = clean_text.replace(currency.upper(), '$')
-    # The physical " flap is addressed as 'q' in the default firmware character map.
-    # Only apply this substitution if " is not in the active char map.
-    if '"' not in get_flap_chars():
-        clean_text = clean_text.replace('"', 'q')
+    clean_text = _prepare_text(text, raw=raw)
     n = get_module_count()
-    clean_text = clean_text.ljust(n)[:n]
     logging.info(f"DISPLAY: {clean_text}")
 
     if order is None:
