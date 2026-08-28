@@ -5,7 +5,6 @@ import logging
 import os
 import requests
 import shutil
-import time
 import urllib.request
 from flask import Blueprint, jsonify, request
 from splitflap.settings import APPS_PATH, save_settings, settings
@@ -198,7 +197,6 @@ def triggers_route():
     if request.method == 'GET':
         trigs = settings.get('triggers', [])
         # Annotate with last_fired info
-        now = time.time()
         result = []
         for t in trigs:
             entry = dict(t)

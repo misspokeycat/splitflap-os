@@ -90,10 +90,6 @@ def _run_app_playlist():
                     else:
                         eff_delay = float(settings.get('global_loop_delay', 5))
 
-                    active_order = None
-                    if is_anim:
-                        active_order = get_animation_order(settings.get('anim_style', 'ltr'))
-
                     for page in display_pages:
                         if state.stop_event.is_set() or time.time() >= deadline:
                             break
@@ -143,9 +139,7 @@ def _get_pages_for_app(app_key):
 def playlist_loop():
 
     while True:
-        now = time.time()
         display_pages = []
-        active_order  = None   # custom module send order for this cycle
 
         # ── App playlist mode ─────────────────────────────
         if state.active_app_playlist is not None:
@@ -160,15 +154,11 @@ def playlist_loop():
         elif state.active_app in _plugin_registry:
             manifest = _plugin_registry[state.active_app]
             display_pages = get_plugin_pages(state.active_app)
-            if manifest.get('animation'):
-                active_order = get_animation_order(settings.get('anim_style', 'ltr'))
 
         elif state.active_app.startswith('plugin_') and state.active_app[7:] in _plugin_registry:
             plugin_id = state.active_app[7:]
             manifest = _plugin_registry[plugin_id]
             display_pages = get_plugin_pages(plugin_id)
-            if manifest.get('animation'):
-                active_order = get_animation_order(settings.get('anim_style', 'ltr'))
 
         else:
             display_pages = state.current_playlist

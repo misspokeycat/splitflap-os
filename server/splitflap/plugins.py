@@ -31,7 +31,6 @@ _registry_cache = {'data': None, 'fetched_at': 0}
 
 
 def load_installed_plugins():
-    global _plugin_registry, _plugin_modules, _plugin_data, _plugin_triggers
     _plugin_registry.clear()
     _plugin_modules.clear()
     _plugin_data.clear()
