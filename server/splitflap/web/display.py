@@ -1,11 +1,11 @@
 """Display state and playback control."""
 
 from flask import Blueprint, jsonify, render_template, request
-from splitflap.settings import read_version, settings
+from splitflap.settings import read_version
 from splitflap.grid import get_cols, get_module_count, get_rows
 from splitflap.state import state
 from splitflap.transport import send_raw
-from splitflap.plugins import _plugin_registry
+from splitflap.plugins import loop_delay_for
 from splitflap.mqtt import mqtt_publish_state
 
 bp = Blueprint("display", __name__)
@@ -53,20 +53,7 @@ def run_app():
     state.active_app_playlist = None
     state.active_app   = request.json.get('app')
 
-    # Resolve plugin_ prefix
-    registry_key = state.active_app[7:] if state.active_app and state.active_app.startswith('plugin_') else state.active_app
-
-    # Use loop_delay from user settings, then manifest, then global default
-    if registry_key in _plugin_registry:
-        manifest = _plugin_registry[registry_key]
-        if manifest.get('animation'):
-            state.loop_delay = max(0.1, float(settings.get('anim_speed', '0.4')))
-        else:
-            saved = settings.get(f'plugin_{registry_key}_loop_delay', '')
-            default = float(manifest.get('loop_delay', settings.get('global_loop_delay', 5)))
-            state.loop_delay = float(saved) if saved else default
-    else:
-        state.loop_delay = float(settings.get('global_loop_delay', 5))
+    state.loop_delay = loop_delay_for(state.active_app)
 
     state.stop_event.set()
     mqtt_publish_state()

@@ -13,7 +13,7 @@ import json
 import logging
 
 from splitflap.grid import format_lines, get_cols, get_module_count, get_rows
-from splitflap.plugins import _plugin_registry
+from splitflap.plugins import _plugin_registry, loop_delay_for
 from splitflap.settings import save_settings, settings
 from splitflap.state import state
 from splitflap.transport import send_raw
@@ -239,12 +239,7 @@ def _mqtt_on_message(client, userdata, msg):
         elif payload in _plugin_registry:
             state.active_app = payload
             state.active_app_playlist = None
-            manifest = _plugin_registry[payload]
-            if manifest.get('animation'):
-                state.loop_delay = max(0.1, float(settings.get('anim_speed', '0.4')))
-            else:
-                saved = settings.get(f'plugin_{payload}_loop_delay', '')
-                state.loop_delay = float(saved) if saved else float(manifest.get('loop_delay', 5))
+            state.loop_delay = loop_delay_for(payload)
             state.stop_event.set()
         mqtt_publish_state()
 

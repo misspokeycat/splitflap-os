@@ -97,6 +97,36 @@ def _load_functional_module(app_id, app_dir):
         logging.error(f"Plugin {app_id}: error importing app.py: {e}")
 
 
+def resolve_app_id(app_id):
+    """Strip the legacy "plugin_" prefix some callers still send."""
+    if app_id and app_id.startswith('plugin_'):
+        return app_id[7:]
+    return app_id
+
+
+def loop_delay_for(app_id):
+    """How long to hold each page of an app, in seconds.
+
+    User setting first, then the app's manifest, then the global default.
+    Animations ignore all of that and run at the animation speed, floored so
+    a zero can never spin the display loop with no delay.
+
+    One implementation because the web UI and the MQTT app selector had
+    drifted: starting the same app from Home Assistant used a hardcoded 5s
+    where the web UI used global_loop_delay.
+    """
+    global_default = float(settings.get('global_loop_delay', 5))
+    manifest = _plugin_registry.get(resolve_app_id(app_id))
+    if manifest is None:
+        return global_default
+    if manifest.get('animation'):
+        return max(0.1, float(settings.get('anim_speed', '0.4')))
+    saved = settings.get(f'plugin_{resolve_app_id(app_id)}_loop_delay', '')
+    if saved:
+        return float(saved)
+    return float(manifest.get('loop_delay', global_default))
+
+
 def get_plugin_pages(app_id):
     manifest = _plugin_registry.get(app_id)
     if not manifest:
