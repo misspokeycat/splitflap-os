@@ -96,6 +96,16 @@ class NotifyRouteTests(SplitflapTestCase):
         settings['notify_enabled'] = False
         self.assertEqual(self.post({"text": "HI"}).status_code, 503)
 
+    def test_disabling_between_the_check_and_the_push_is_a_503(self):
+        # push() re-reads the setting, so it can refuse after the handler's own
+        # guard passed. Dereferencing its None would be a 500.
+        real_push = notifications.push
+        def disable_then_push(*args, **kwargs):
+            settings['notify_enabled'] = False
+            return real_push(*args, **kwargs)
+        self.patch_everywhere("push", disable_then_push)
+        self.assertEqual(self.post({"text": "HI"}).status_code, 503)
+
     def test_clearing_by_source_leaves_others(self):
         push("A", "one")
         push("B", "two")

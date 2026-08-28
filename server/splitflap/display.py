@@ -40,6 +40,21 @@ COLOR_MAP = {
     '\U0001f7e6': 'b', '\U0001f7ea': 'p', '\u2b1c': 'w', '\u2b1b': ' ',
 }
 
+def _commit(clean_text):
+    """Record what is now on the modules and tell Home Assistant.
+
+    mqtt_last_text is updated here, not only in the MQTT command handler:
+    the text entity's state topic is retained, so leaving it behind meant
+    Home Assistant showing — and republishing on every send — whatever was
+    last set over MQTT, no matter what the web UI, an app or a schedule had
+    since put on the display.
+    """
+    state.current_display_string = clean_text
+    state.mqtt_last_text = clean_text.rstrip()
+    state.is_homed = True
+    mqtt_publish_state()
+
+
 def _prepare_text(text, raw=False):
     """Normalise text for the modules and fit it to the grid.
 
@@ -102,9 +117,7 @@ def send_to_display_sync(text):
                 state.ser.flush()
             state.current_indices[i] = target_idx
 
-    state.current_display_string = clean_text
-    state.is_homed = True
-    mqtt_publish_state()
+    _commit(clean_text)
     return max_dist
 
 
@@ -155,9 +168,7 @@ def send_to_display_slot(text, effect_speed=80):
                 max_dist = dist
             state.current_indices[i] = target_idx
 
-    state.current_display_string = clean_text
-    state.is_homed = True
-    mqtt_publish_state()
+    _commit(clean_text)
     return max_dist
 
 
@@ -194,9 +205,7 @@ def send_to_display(text, order=None, raw=False, step_delay_ms=15):
 
     # Update sim state immediately so the browser reflects the new text without waiting
     # for the serial loop to complete (fixes sim lag on hardware transitions)
-    state.current_display_string = clean_text
-    state.is_homed = True
-    mqtt_publish_state()
+    _commit(clean_text)
 
     max_dist = 0
     with serial_lock:

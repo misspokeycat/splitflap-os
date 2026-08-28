@@ -39,6 +39,10 @@ def notify_push():
         display_seconds=data.get('display_seconds'),
         animation=data.get('animation', 'ltr'),
     )
+    if msg is None:
+        # push() re-reads notify_enabled, so it can refuse even though the
+        # check at the top of this handler passed.
+        return jsonify(error='Notification interrupts are disabled'), 503
     logging.info(f"Notify: {source} pushed '{text[:30]}'")
     return jsonify(id=msg['id'], source=source, position=len(_notify_queue)), 201
 

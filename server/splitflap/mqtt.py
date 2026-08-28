@@ -265,9 +265,14 @@ def _mqtt_on_message(client, userdata, msg):
         send_raw("m**h")
         state.active_app = None
         state.active_app_playlist = None
+        # _run_app_playlist captures the entry list into a local and loops over
+        # it, so clearing the state attribute does not reach a running playlist
+        # — only stop_event does.
+        state.stop_event.set()
         state.is_homed = True
         state.current_indices = [0] * get_module_count()
         state.current_display_string = " " * get_module_count()
+        state.mqtt_last_text = ""
         mqtt_publish_state()
 
 

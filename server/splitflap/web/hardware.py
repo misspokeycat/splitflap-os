@@ -42,7 +42,7 @@ def set_serial_port():
                 state.ser.close()
             except Exception:
                 pass
-        state.ser, SERIAL_PORT = open_serial(new_port)
+        state.ser, state.serial_port = open_serial(new_port)
         state.sim_mode = not state.ser
         universal_firmware.reset()
 
@@ -118,7 +118,7 @@ def connection_config():
                     state.ser.close()
                 except Exception:
                     pass
-            state.ser, SERIAL_PORT = open_gateway({
+            state.ser, state.serial_port = open_gateway({
                 "broker": broker, "port": gw_port, "prefix": prefix,
                 "user": user, "password": password,
             })
@@ -143,7 +143,7 @@ def connection_config():
             except Exception:
                 pass
         port = (data.get('port') or settings.get('serial_port') or '').strip() or None
-        state.ser, SERIAL_PORT = open_serial(port)
+        state.ser, state.serial_port = open_serial(port)
         state.sim_mode = not state.ser
         universal_firmware.reset()
     return jsonify(

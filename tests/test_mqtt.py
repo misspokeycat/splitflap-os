@@ -121,6 +121,22 @@ class StatePublishTests(SplitflapTestCase):
         mqtt._mqtt_on_message(self.client, None, FakeMessage(mqtt.MQTT_TEXT_CMD, "HI|THERE"))
         self.assertEqual(self.client.last(mqtt.MQTT_TEXT_STATE), "HI|THERE")
 
+    def test_text_state_follows_a_display_change_from_elsewhere(self):
+        # The state topic is retained, so a stale value is not just wrong once
+        # — it is republished on every send and survives a restart.
+        from splitflap.display import send_to_display
+        mqtt._mqtt_on_message(self.client, None, FakeMessage(mqtt.MQTT_TEXT_CMD, "FROM MQTT"))
+        send_to_display("FROM THE WEB UI")
+        self.assertEqual(mqtt.state.mqtt_last_text, "FROM THE WEB UI")
+        mqtt.mqtt_publish_state()
+        self.assertEqual(self.client.last(mqtt.MQTT_TEXT_STATE), "FROM THE WEB UI")
+
+    def test_homing_clears_the_text_entity(self):
+        mqtt._mqtt_on_message(self.client, None, FakeMessage(mqtt.MQTT_TEXT_CMD, "HELLO"))
+        mqtt._mqtt_on_message(
+            self.client, None, FakeMessage(f"{mqtt.MQTT_TOPIC_PREFIX}/home/set", "PRESS"))
+        self.assertEqual(self.client.last(mqtt.MQTT_TEXT_STATE), "")
+
     def test_state_is_retained(self):
         mqtt.mqtt_publish_state()
         retained = {t: r for t, _, r in self.client.published}
@@ -166,6 +182,16 @@ class HomeButtonTests(SplitflapTestCase):
         self.home()
         self.assertIsNone(state.active_app)
         self.assertIsNone(state.active_app_playlist)
+
+    def test_home_command_interrupts_the_display_loop(self):
+        # _run_app_playlist captures the entry list into a local and loops over
+        # it. Clearing state.active_app_playlist does not reach it, so without
+        # stop_event the playlist keeps driving the display after homing while
+        # the UI and Home Assistant both report nothing playing.
+        state.active_app_playlist = ["time"]
+        state.stop_event.clear()
+        self.home()
+        self.assertTrue(state.stop_event.is_set())
 
 
 class AutoHomeOnBootTests(SplitflapTestCase):
