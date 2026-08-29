@@ -28,19 +28,22 @@ def check_update():
         resp = requests.get(repo_url, timeout=5, headers={'User-Agent': 'SplitflapOS'})
         resp.raise_for_status()
         data = resp.json()
-        latest = data.get('tag_name', '').lstrip('v')
         current = read_version()
-        has_update = latest and latest != current
+        # Coerce every field: the cache-hit path below returns the stored
+        # result without a try block, so a value that cannot be serialised
+        # would turn this route into a 500 for the next hour.
+        latest = str(data.get('tag_name') or '').lstrip('v')
         result = {
             'current': current,
             'latest': latest,
-            'has_update': has_update,
-            'release_name': data.get('name', ''),
-            'release_url': data.get('html_url', ''),
+            'has_update': bool(latest and latest != current),
+            'release_name': str(data.get('name') or ''),
+            'release_url': str(data.get('html_url') or ''),
         }
+        response = jsonify(result)      # raises here rather than after caching
         _update_cache['result'] = result
         _update_cache['checked_at'] = now
-        return jsonify(result)
+        return response
     except Exception as e:
         logging.error(f"Update check error: {e}")
         return jsonify({'current': read_version(), 'latest': None, 'has_update': False, 'error': str(e)})

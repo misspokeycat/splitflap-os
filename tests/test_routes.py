@@ -257,6 +257,41 @@ class WriteRouteSmokeTests(RouteSmokeTestCase):
         self.assertEqual(state.current_display_string, " " * get_module_count())
 
 
+class UpdateCheckTests(RouteSmokeTestCase):
+    """/check_update caches its answer for an hour and returns the cached
+    value without a try block, so a result that cannot be serialised poisons
+    the route rather than failing once."""
+
+    def setUp(self):
+        super().setUp()
+        from splitflap.web.system import _update_cache
+        self._cache = _update_cache
+        _update_cache.update(checked_at=0, result=None)
+        self.addCleanup(_update_cache.update, checked_at=0, result=None)
+
+    def test_an_unserialisable_upstream_payload_does_not_poison_the_cache(self):
+        # The mocked requests.get returns a MagicMock, so every field read out
+        # of resp.json() is itself a MagicMock — the shape that used to be
+        # cached and then blow up on the next call.
+        self.assertNotCrashed(self.http.get("/check_update"), "first call")
+        self.assertNotCrashed(self.http.get("/check_update"), "cached call")
+
+    def test_a_good_result_is_cached_and_served(self):
+        payload = {"tag_name": "v9.9.9", "name": "Release", "html_url": "http://x"}
+        with mock.patch("requests.get", return_value=_fake_response(payload)):
+            first = self.http.get("/check_update").get_json()
+        self.assertEqual(first["latest"], "9.9.9")
+        self.assertIs(first["has_update"], True)
+        # served from cache now, with no upstream call at all
+        with mock.patch("requests.get", side_effect=AssertionError("should not refetch")):
+            self.assertEqual(self.http.get("/check_update").get_json(), first)
+
+    def test_has_update_is_a_boolean_even_when_upstream_is_empty(self):
+        with mock.patch("requests.get", return_value=_fake_response({"tag_name": None})):
+            body = self.http.get("/check_update").get_json()
+        self.assertIs(body["has_update"], False)
+
+
 class MalformedInputTests(RouteSmokeTestCase):
     """Every write route, against payloads the UI would never send.
 
