@@ -202,6 +202,9 @@ venv/bin/pip install -r server/requirements.txt -r requirements-dev.txt
 venv/bin/python -m pytest tests/ -q
 ```
 
+The browser-side tests under `tests/js/` run through the same command via
+node, and are skipped if node is not installed.
+
 Importing `server/app.py` brings the whole server up: it opens the serial port,
 homes the display, starts four background loops and connects to the broker. Set
 `SPLITFLAP_NO_BACKGROUND_TASKS=1` to import it without any of that — the test

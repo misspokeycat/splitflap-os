@@ -2373,14 +2373,45 @@ function renderUniversalProvisioning(data){
   if(typeof lucide!=='undefined') lucide.createIcons();
 }
 
+// The ID a user has typed must survive the 2.5s status poll that rebuilds
+// this list. Without this, typing an ID and pausing for a moment silently
+// replaced it with the auto-suggested one.
+function collectTypedIds(list){
+  const typed = {};
+  list.querySelectorAll('.provision-id-input').forEach(input=>{
+    if(input.dataset.edited === '1') typed[input.dataset.serial] = input.value;
+  });
+  return typed;
+}
+
+function restoreTypedIds(list, typed){
+  list.querySelectorAll('.provision-id-input').forEach(input=>{
+    const value = typed[input.dataset.serial];
+    if(value !== undefined){
+      input.value = value;
+      input.dataset.edited = '1';
+    }
+  });
+}
+
 function renderUnprovisionedModules(items, modules, firstSuggestedId){
   const list = document.getElementById('unprovisionedModules');
   if(!list) return;
+
+  // Never rebuild the list out from under someone mid-keystroke: replacing the
+  // element would drop focus and the caret even if the value were restored.
+  const active = document.activeElement;
+  if(active && active.classList && active.classList.contains('provision-id-input')
+     && list.contains(active)){
+    return;
+  }
+
   if(!items.length){
     list.innerHTML = '<div class="provision-empty">No recent advertisements. Newly flashed modules may take up to 15 seconds to appear.</div>';
     return;
   }
 
+  const typed = collectTypedIds(list);
   const used = new Set((modules || []).map(module=>Number(module.id)));
   let nextId = Number.isInteger(firstSuggestedId) ? firstSuggestedId : 0;
   list.innerHTML = items.map(item=>{
@@ -2397,10 +2428,12 @@ function renderUnprovisionedModules(items, modules, firstSuggestedId){
         <i data-lucide="locate-fixed" style="width:14px;height:14px"></i> Identify
       </button>
       <input class="provision-id-input" id="provision-id-${serial}" type="number" min="0" max="254"
+             data-serial="${serial}" oninput="this.dataset.edited='1'"
              value="${suggested}" aria-label="New module ID for ${serial}">
       <button class="btn btn-success btn-sm" onclick="assignUniversalModule('${serial}')">Assign ID</button>
     </div>`;
   }).join('');
+  restoreTypedIds(list, typed);
 }
 
 function renderUniversalModules(modules){
