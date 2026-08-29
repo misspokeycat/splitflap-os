@@ -101,14 +101,14 @@ def custom_tune():
         idx  = int(data.get('index', 0))
         step = int(data.get('step', 0))
         send_raw(f"m{mod_id:02d}w{idx}:{step}")
-        settings['tuned_chars'][str(mod_id)][str(idx)] = step
+        settings['tuned_chars'].setdefault(str(mod_id), {})[str(idx)] = step
         save_settings(settings)
 
     elif action == 'erase':
         idx = str(data.get('index', ''))
         if idx:
             send_raw(f"m{mod_id:02d}w{idx}:65535")
-            settings['tuned_chars'][str(mod_id)].pop(idx, None)
+            settings['tuned_chars'].setdefault(str(mod_id), {}).pop(idx, None)
         else:
             send_raw(f"m{mod_id:02d}e")
             settings['tuned_chars'][str(mod_id)] = {}
@@ -288,6 +288,10 @@ def restore_settings():
     data = request.json
     if not data:
         return jsonify(status="error", message="No data"), 400
+    for key in ('offsets', 'calibrations', 'tuned_chars'):
+        if key in data and not isinstance(data[key], dict):
+            return jsonify(status="error",
+                           message=f"'{key}' must be an object"), 400
     if 'offsets'      in data: settings['offsets'].update(data['offsets'])
     if 'calibrations' in data: settings['calibrations'].update(data['calibrations'])
     if 'tuned_chars'  in data: settings['tuned_chars'].update(data['tuned_chars'])
@@ -305,6 +309,7 @@ def restore_settings():
                 if sv != 65535:
                     send_raw(f"m{i:02d}w{idx}:{sv}")
             logging.info(f"Restored m{i:02d}")
-    return jsonify(status="success", hardware_updated=hw, modules_updated=45)
+    return jsonify(status="success", hardware_updated=hw,
+                   modules_updated=get_module_count())
 
 # ── Saved Playlists ──────────────────────────────────────────
