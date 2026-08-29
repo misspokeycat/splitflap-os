@@ -15,6 +15,33 @@ from tuning import build_tuning_adjust_commands
 bp = Blueprint("tuning", __name__)
 
 
+def _module_id(raw):
+    """Parse an addressable module id, or None.
+
+    Module ids come from request bodies and are used both to index the display
+    buffers and to build serial commands, so an id outside the grid is not a
+    harmless no-op: it used to raise IndexError, after already putting a
+    malformed frame like "m999h" on the wire.
+    """
+    try:
+        mod_id = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if not 0 <= mod_id < get_module_count():
+        return None
+    return mod_id
+
+
+def _as_int(raw, default=0):
+    """Parse an integer field from a request body, or None if it is not one."""
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 @bp.route('/settings', methods=['GET', 'POST'])
 def handle_settings():
     if request.method == 'POST':
@@ -38,7 +65,11 @@ def handle_settings():
             return jsonify(status="Saved")
 
         if action == 'adjust':
-            delta      = int(data.get('delta', 0))
+            if _module_id(data.get('id', 0)) is None:
+                return jsonify(error="Unknown module"), 400
+            delta = _as_int(data.get('delta'), 0)
+            if delta is None:
+                return jsonify(error="'delta' must be a number"), 400
             new_offset = int(settings['offsets'].get(mod_id, 2832)) + delta
             settings['offsets'][mod_id] = new_offset
             save_settings(settings)
@@ -46,10 +77,13 @@ def handle_settings():
             return jsonify(new_offset=new_offset)
 
         if action == 'home_one':
-            send_raw(f"m{int(mod_id):02d}h")
-            state.current_indices[int(mod_id)] = 0
+            module = _module_id(data.get('id', 0))
+            if module is None:
+                return jsonify(error="Unknown module"), 400
+            send_raw(f"m{module:02d}h")
+            state.current_indices[module] = 0
             sl = list(state.current_display_string.ljust(get_module_count()))
-            sl[int(mod_id)] = ' '
+            sl[module] = ' '
             state.current_display_string = "".join(sl)
             return jsonify(status="Homing")
 
@@ -85,11 +119,15 @@ def handle_settings():
 def custom_tune():
     data   = request.json
     action = data.get('action')
-    mod_id = int(data.get('id', 0))
+    mod_id = _module_id(data.get('id', 0))
+    if mod_id is None:
+        return jsonify(error="Unknown module"), 400
 
     if action == 'goto':
-        step = int(data.get('step', 0))
-        idx  = int(data.get('index', 0))
+        step = _as_int(data.get('step'), 0)
+        idx  = _as_int(data.get('index'), 0)
+        if step is None or idx is None:
+            return jsonify(error="'step' and 'index' must be numbers"), 400
         send_raw(f"m{mod_id:02d}g{step}")
         if 0 <= idx < len(get_flap_chars()):
             state.current_indices[mod_id] = idx
@@ -98,8 +136,10 @@ def custom_tune():
             state.current_display_string = "".join(sl)
 
     elif action == 'save':
-        idx  = int(data.get('index', 0))
-        step = int(data.get('step', 0))
+        idx  = _as_int(data.get('index'), 0)
+        step = _as_int(data.get('step'), 0)
+        if idx is None or step is None:
+            return jsonify(error="'step' and 'index' must be numbers"), 400
         send_raw(f"m{mod_id:02d}w{idx}:{step}")
         settings['tuned_chars'].setdefault(str(mod_id), {})[str(idx)] = step
         save_settings(settings)

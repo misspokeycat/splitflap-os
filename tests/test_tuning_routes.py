@@ -59,6 +59,53 @@ class LargeGridTuningTests(SplitflapTestCase):
         self.assertEqual(state.current_indices[self.high], 0)
 
 
+class ModuleIdValidationTests(SplitflapTestCase):
+    """Module ids arrive in request bodies and are used both to index the
+    display buffers and to build serial commands. An id outside the grid
+    raised IndexError — after already putting a malformed frame like "m999h"
+    on the wire."""
+
+    def setUp(self):
+        super().setUp()
+        app.app.config["TESTING"] = False
+        self.http = app.app.test_client()
+        self.set_grid(3, 15)          # modules 0-44
+
+    def test_home_one_rejects_a_module_outside_the_grid(self):
+        response = self.http.post("/settings", json={"action": "home_one", "id": 999})
+        self.assertEqual(response.status_code, 400)
+
+    def test_home_one_sends_nothing_for_a_bad_module(self):
+        self.http.post("/settings", json={"action": "home_one", "id": 999})
+        self.assertEqual(self.sent, [], "a command was sent for a module that does not exist")
+
+    def test_offset_adjust_rejects_a_module_outside_the_grid(self):
+        response = self.http.post("/settings", json={"action": "adjust", "id": 999, "delta": 5})
+        self.assertEqual(response.status_code, 400)
+        self.assertNotIn("999", settings['offsets'])
+
+    def test_custom_tune_rejects_a_module_outside_the_grid(self):
+        response = self.http.post("/custom_tune", json={
+            "action": "goto", "id": 999, "step": 10, "index": 1})
+        self.assertEqual(response.status_code, 400)
+
+    def test_custom_tune_rejects_a_non_numeric_step(self):
+        response = self.http.post("/custom_tune", json={
+            "action": "goto", "id": 0, "step": "abc", "index": 1})
+        self.assertEqual(response.status_code, 400)
+
+    def test_a_negative_module_id_is_rejected(self):
+        # Negative indices are valid Python but address the wrong module.
+        response = self.http.post("/custom_tune", json={
+            "action": "goto", "id": -1, "step": 10, "index": 1})
+        self.assertEqual(response.status_code, 400)
+
+    def test_the_last_real_module_is_still_accepted(self):
+        response = self.http.post("/settings", json={"action": "home_one", "id": 44})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.sent, ["m44h"])
+
+
 class RestoreTests(SplitflapTestCase):
     def setUp(self):
         super().setUp()
