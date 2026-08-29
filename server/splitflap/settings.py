@@ -9,15 +9,17 @@ import json
 import os
 
 
-CONFIG_PATH = os.environ.get(
-    "SPLITFLAP_CONFIG",
-    os.path.join(os.path.dirname(os.path.dirname(__file__)), "settings.json"),
-)
+# Where everything lives, derived from this file rather than the working
+# directory so the server runs from wherever it is checked out. One definition:
+# these were four separate __file__ walks, and the one in the updater counted
+# the wrong number of levels after the package layout changed.
+SERVER_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPO_DIR = os.path.dirname(SERVER_DIR)
 
-APPS_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "apps")
-VERSION_FILE = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "VERSION")
+CONFIG_PATH = os.environ.get(
+    "SPLITFLAP_CONFIG", os.path.join(SERVER_DIR, "settings.json"))
+APPS_PATH = os.path.join(REPO_DIR, "apps")
+VERSION_FILE = os.path.join(REPO_DIR, "VERSION")
 
 DEFAULT_FLAP_CHARS = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$&()-+=;q:%\'.,/?*roygbpw"
 

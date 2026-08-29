@@ -159,5 +159,43 @@ class SchedulerRobustnessTests(unittest.TestCase):
                 settings['schedules'] = original
 
 
+class RepoPathTests(unittest.TestCase):
+    """Paths are derived from the source files, not the working directory, so
+    the server runs from wherever it is checked out — /opt on one machine,
+    a home directory on another.
+
+    These were four separate __file__ walks. The one in the updater counted
+    levels for app.py and was never adjusted when the package layout changed,
+    so it pointed two directories too deep: the venv check always failed,
+    every update claimed to need a reinstall, and the restart then ran a bash
+    script that did not exist — failing without raising, which left the new
+    code pulled and the old code still running.
+    """
+
+    def test_repo_dir_is_the_checkout_root(self):
+        from splitflap.settings import REPO_DIR
+        self.assertTrue(os.path.isdir(os.path.join(REPO_DIR, ".git")),
+                        f"{REPO_DIR} is not the repository root")
+
+    def test_server_dir_holds_the_entry_point(self):
+        from splitflap.settings import SERVER_DIR
+        self.assertTrue(os.path.isfile(os.path.join(SERVER_DIR, "app.py")))
+
+    def test_the_paths_the_updater_needs_all_resolve(self):
+        from splitflap.settings import REPO_DIR, SERVER_DIR
+        for path in (os.path.join(SERVER_DIR, "requirements.txt"),
+                     os.path.join(REPO_DIR, "setup", "install.sh"),
+                     os.path.join(REPO_DIR, "apps"),
+                     os.path.join(REPO_DIR, "VERSION")):
+            with self.subTest(path=path):
+                self.assertTrue(os.path.exists(path), f"{path} does not exist")
+
+    def test_the_updater_uses_the_shared_paths(self):
+        # Not by running it — it restarts the service.
+        source = (SERVER_DIR / "splitflap" / "web" / "system.py").read_text(encoding="utf-8")
+        self.assertIn("repo_dir = REPO_DIR", source)
+        self.assertNotIn("os.path.dirname(__file__)", source)
+
+
 if __name__ == "__main__":
     unittest.main()

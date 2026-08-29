@@ -6,7 +6,7 @@ import requests
 import threading
 import time
 from flask import Blueprint, jsonify, request
-from splitflap.settings import read_version
+from splitflap.settings import REPO_DIR, SERVER_DIR, read_version
 
 bp = Blueprint("system", __name__)
 
@@ -52,8 +52,8 @@ def check_update():
 def apply_update():
     """Pull latest from main and restart the service."""
     import subprocess, hashlib
-    repo_dir = os.path.join(os.path.dirname(__file__), '..')
-    req_path = os.path.join(repo_dir, 'server', 'requirements.txt')
+    repo_dir = REPO_DIR
+    req_path = os.path.join(SERVER_DIR, 'requirements.txt')
 
     def _hash_file(path):
         try:
@@ -101,12 +101,20 @@ def apply_update():
         def _restart():
             time.sleep(1)
             try:
-                if needs_install:
-                    install_script = os.path.join(repo_dir, 'setup', 'install.sh')
-                    subprocess.run(['bash', install_script], timeout=120)
+                install_script = os.path.join(repo_dir, 'setup', 'install.sh')
+                # bash exits non-zero on a missing script rather than raising,
+                # which would leave the new code pulled and the old code
+                # running with nothing to say so.
+                if needs_install and os.path.isfile(install_script):
+                    subprocess.run(['bash', install_script], timeout=180, check=True)
                 else:
-                    subprocess.run(['systemctl', 'restart', 'splitflap.service'], timeout=10)
+                    if needs_install:
+                        logging.error("Install script missing at %s; restarting only",
+                                      install_script)
+                    subprocess.run(['systemctl', 'restart', 'splitflap.service'],
+                                   timeout=10, check=True)
             except Exception:
+                logging.exception("Restart after update failed; re-execing")
                 os.execv(os.sys.executable, [os.sys.executable] + os.sys.argv)
         threading.Thread(target=_restart, daemon=True).start()
         return jsonify(status='updating', needs_install=needs_install)
