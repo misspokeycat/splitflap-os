@@ -2,11 +2,12 @@
 
 from flask import Blueprint, jsonify, render_template, request
 from splitflap.settings import read_version
-from splitflap.grid import get_cols, get_module_count, get_rows
+from splitflap.grid import get_cols, get_module_count, get_rows, layout_text
 from splitflap.state import state
 from splitflap.transport import send_raw
 from splitflap.plugins import loop_delay_for
 from splitflap.mqtt import mqtt_publish_state
+from splitflap.web.params import as_int
 
 bp = Blueprint("display", __name__)
 
@@ -38,15 +39,42 @@ def toggle_sim():
 
 @bp.route('/update_playlist', methods=['POST'])
 def update_playlist():
-    data             = request.json
-    state.current_playlist = data.get('pages', [])
-    state.loop_delay       = data.get('delay', 5)
+    data = request.json or {}
+
+    # Two input forms. `pages` is the original: raw strings written to the
+    # modules as-is, which the web UI builds because it knows the geometry.
+    # `text` is the form a person can type — "HELLO|WORLD" — laid out here so
+    # that callers outside the server do not have to pad and centre by hand.
+    # The MQTT text entity has always taken it; this is the same thing.
+    if 'pages' in data:
+        pages = data['pages']
+        if not isinstance(pages, list):
+            return jsonify(error="'pages' must be a list"), 400
+    elif 'text' in data:
+        text = data['text']
+        if isinstance(text, str):
+            text = [text]
+        if not isinstance(text, list) or not all(isinstance(t, str) for t in text):
+            return jsonify(error="'text' must be a string or a list of strings"), 400
+        center = data.get('center', True)
+        if not isinstance(center, bool):
+            return jsonify(error="'center' must be true or false"), 400
+        pages = [layout_text(t, center=center) for t in text]
+    else:
+        pages = []
+
+    delay = as_int(data.get('delay'), 5)
+    if delay is None:
+        return jsonify(error="'delay' must be a number"), 400
+
+    state.current_playlist = pages
+    state.loop_delay       = delay
     state.last_sent_page   = None
     state.active_app       = None
     state.active_app_playlist = None
     state.stop_event.set()
     mqtt_publish_state()
-    return jsonify(status="success")
+    return jsonify(status="success", pages=len(pages))
 
 @bp.route('/run_app', methods=['POST'])
 def run_app():

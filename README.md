@@ -149,6 +149,51 @@ read and write. Import it as `from splitflap.state import state` and access
 attributes (`state.active_app`); rebinding a `from ... import` name would only
 change your module's copy.
 
+## HTTP API
+
+No authentication — the server assumes a trusted LAN. `/notify` is the one
+exception, and only because it predates the rest.
+
+Set the display:
+
+```bash
+curl -X POST http://splitflap.local/update_playlist \
+  -H 'Content-Type: application/json' \
+  -d '{"text": "HELLO|WORLD"}'
+```
+
+`|` starts a new line, lines are centred to fill the grid, and anything past
+the last row is dropped. `{"center": false}` left-aligns instead. Pass a list
+for a rotation, with `delay` seconds per page:
+
+```bash
+-d '{"text": ["FIRST", "SECOND"], "delay": 10}'
+```
+
+`{"pages": [...]}` is the lower-level form the web UI uses: strings written to
+the modules as-is, so the caller lays the grid out itself. A page may also be
+an object — `{"text": ..., "delay": ..., "style": ..., "speed": ...}` — for
+per-page timing and transition. When both are given, `pages` wins.
+
+Other endpoints:
+
+| | |
+|---|---|
+| `POST /run_app` | `{"app": "weather"}` — start an installed app |
+| `POST /stop_app` | stop it |
+| `POST /run_app_playlist` | `{"name": "..."}` — start a saved app playlist |
+| `GET /current_state` | what is on the display now |
+| `GET /grid_config` | `{rows, cols, total}` |
+| `GET /installed_apps` | the app list and their settings schema |
+| `POST /notify` | temporary interrupt; needs a bearer token from `notify_sources` |
+
+The same text form reaches the display over MQTT, if the Home Assistant
+integration is enabled:
+
+```bash
+mosquitto_pub -t splitflap/text/set -m 'HELLO|WORLD'
+```
+
 ## Development
 
 ```bash

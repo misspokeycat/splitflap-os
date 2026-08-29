@@ -12,7 +12,7 @@ hardware, not a way of being controlled.
 import json
 import logging
 
-from splitflap.grid import format_lines, get_cols, get_module_count, get_rows
+from splitflap.grid import get_module_count, get_rows, layout_text
 from splitflap.plugins import _plugin_registry, loop_delay_for
 from splitflap.settings import save_settings, settings
 from splitflap.state import state
@@ -64,17 +64,8 @@ def _mqtt_text_max():
 
 
 def _mqtt_format_text(payload):
-    """Lay a '|'-delimited payload out across the grid.
-
-    Honours the Center Text switch: centred when on, left-aligned when off.
-    Extra lines beyond the grid height are dropped.
-    """
-    lines = payload.split('|')[:get_rows()]
-    if settings.get('mqtt_center', True):
-        return format_lines(*lines)
-    cols, rows = get_cols(), get_rows()
-    padded = lines + [''] * (rows - len(lines))
-    return ''.join(l.ljust(cols)[:cols] for l in padded[:rows])
+    """Lay out a text payload, honouring the Center Text switch."""
+    return layout_text(payload, center=settings.get('mqtt_center', True))
 
 
 def mqtt_publish_state():
