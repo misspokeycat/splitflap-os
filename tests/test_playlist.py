@@ -4,7 +4,8 @@ import unittest
 
 from support import SplitflapTestCase, state
 
-from splitflap import playlist
+from splitflap import notifications, playlist
+from splitflap.plugins import _plugin_registry
 from splitflap.settings import settings
 
 
@@ -60,6 +61,96 @@ class AppPlaylistRunnerTests(SplitflapTestCase):
         ]
         playlist._run_app_playlist()
         self.assertEqual(sent, ["HELLO"])
+
+
+class SharedPageBehaviourTests(SplitflapTestCase):
+    """_run_app_playlist and playlist_loop used to carry their own copy of
+    "send the page, wait out the rotation, hold". Two features were added to
+    one copy and never to the other:
+
+      6c6fdbb  "Skip rotation wait for random spin app"  -> playlist_loop only
+      a1711be  notification interrupts                   -> playlist_loop only
+
+    so the same app ran slower inside a playlist than on its own, and
+    notifications never appeared while an app playlist was running. Both loops
+    now share _show_page, which is what makes these pass.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.set_grid(3, 15)
+        self.patch_everywhere("_get_pages_for_app", lambda key: ["PAGE"])
+        self.patch_everywhere(
+            "_send_with_effect",
+            lambda text, style, speed, is_anim, app_id=None: 7)
+        self.rotation_waits = []
+        self.patch_everywhere(
+            "_rotation_time",
+            lambda dist: self.rotation_waits.append(dist) or 0.0)
+        state.app_playlist_loop = False
+        state.last_sent_page = None
+        # The queue outlives a test unless it is cleared: a message left
+        # undelivered by one test gets shown by the next.
+        notifications._notify_queue.clear()
+        self.addCleanup(notifications._notify_queue.clear)
+
+    def register(self, app_id, manifest):
+        _plugin_registry[app_id] = manifest
+        self.addCleanup(_plugin_registry.pop, app_id, None)
+
+    def run_playlist(self, app_id, duration=0.2):
+        # A page whose dwell outlasts the entry's duration is cut short before
+        # the end of _show_page, so tests that need the whole page to finish
+        # set the dwell to zero and give the entry room.
+        state.active_app_playlist = [{"type": "app", "app": app_id, "duration": duration}]
+        playlist._run_app_playlist()
+
+    def test_an_app_playlist_waits_for_rotation_by_default(self):
+        self.register("normal-app", {})
+        self.run_playlist("normal-app")
+        self.assertTrue(self.rotation_waits, "the rotation wait was skipped")
+
+    def test_an_app_playlist_honours_skip_rotation_wait(self):
+        self.register("spinner", {"skip_rotation_wait": True})
+        self.run_playlist("spinner")
+        self.assertEqual(self.rotation_waits, [],
+                         "skip_rotation_wait was ignored inside a playlist")
+
+    def test_notifications_interrupt_an_app_playlist(self):
+        shown = []
+        self.patch_everywhere("_show_notify_message", shown.append)
+        settings['notify_enabled'] = True
+        settings['global_loop_delay'] = 0
+        notifications.push("URGENT", "test")
+        self.register("normal-app", {})
+        self.run_playlist("normal-app", duration=1)
+        # The entry re-renders its page until its duration is up, so the exact
+        # count depends on timing; that it reached the display at all is what
+        # this is about.
+        self.assertIn("URGENT", [m['text'] for m in shown])
+
+    def test_notifications_are_not_shown_when_disabled(self):
+        shown = []
+        self.patch_everywhere("_show_notify_message", shown.append)
+        settings['notify_enabled'] = False
+        settings['global_loop_delay'] = 0
+        self.register("normal-app", {})
+        self.run_playlist("normal-app", duration=1)
+        self.assertEqual(shown, [])
+
+    def test_a_stop_takes_priority_over_a_queued_notification(self):
+        # The old playlist_loop broke out of the dwell on stop_event and then
+        # showed a notification anyway, delaying whatever the user had just
+        # asked for. _show_page returns as soon as the hold is cut short.
+        shown = []
+        self.patch_everywhere("_show_notify_message", shown.append)
+        settings['notify_enabled'] = True
+        settings['global_loop_delay'] = 5
+        notifications.push("URGENT", "test")
+        self.register("normal-app", {})
+        state.stop_event.set()
+        self.run_playlist("normal-app", duration=1)
+        self.assertEqual(shown, [])
 
 
 class LoopDelayTests(SplitflapTestCase):

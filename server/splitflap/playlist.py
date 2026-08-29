@@ -19,6 +19,75 @@ from splitflap.state import state
 from splitflap.tasks import start_supervised_loop
 
 
+def _stopping(deadline=None):
+    """True when the current page should be abandoned."""
+    if state.stop_event.is_set():
+        return True
+    return deadline is not None and time.time() >= deadline
+
+
+def _hold(seconds, deadline=None):
+    """Wait, in tenths, giving up early if the selection changes.
+
+    Returns False if it was cut short — the caller should stop too.
+    """
+    for _ in range(int(seconds * 10)):
+        if _stopping(deadline):
+            return False
+        time.sleep(0.1)
+    return True
+
+
+def _page_fields(page, eff_delay):
+    """A page is either a plain string or an object carrying overrides."""
+    if isinstance(page, dict):
+        return (page.get('text', ''),
+                float(page.get('delay', eff_delay)),
+                page.get('style'),
+                int(page.get('speed', 15)))
+    return page, eff_delay, None, 15
+
+
+def _show_page(page, eff_delay, is_anim, reg_key, deadline=None):
+    """Send one page and hold it for its dwell time.
+
+    Returns False if the caller's loop should stop — because the selection
+    changed, or because an app playlist entry ran out of time.
+    """
+    page_text, page_delay, page_style, page_speed = _page_fields(page, eff_delay)
+
+    anim_style = settings.get('anim_style', 'ltr') if is_anim else None
+    state.last_transition_style = (
+        anim_style or page_style
+        or (settings.get(f'plugin_{reg_key}_transition_style') if reg_key else None)
+        or settings.get('transition_style', 'ltr'))
+    state.last_transition_speed = (
+        page_speed if page_speed is not None
+        else int(settings.get('transition_speed', 15)))
+
+    # Animations resend every frame; anything else skips a page already shown.
+    max_dist = 0
+    if is_anim or page_text != state.last_sent_page:
+        max_dist = _send_with_effect(page_text, anim_style or page_style,
+                                     page_speed, is_anim, app_id=reg_key)
+        state.last_sent_page = page_text
+
+    # An app may opt out of waiting for the flaps (a continuous spin, say).
+    skip_rotation = bool(reg_key in _plugin_registry
+                         and _plugin_registry[reg_key].get('skip_rotation_wait'))
+    if not skip_rotation and not _hold(_rotation_time(max_dist), deadline):
+        return False
+    if not _hold(page_delay, deadline):
+        return False
+
+    # A notification interrupt takes the display between pages.
+    if settings.get('notify_enabled', False):
+        msg = _pop_notify()
+        if msg:
+            _show_notify_message(msg)
+    return True
+
+
 def _run_app_playlist():
     """Execute one pass through the app playlist entries."""
 
@@ -91,31 +160,11 @@ def _run_app_playlist():
                         eff_delay = float(settings.get('global_loop_delay', 5))
 
                     for page in display_pages:
-                        if state.stop_event.is_set() or time.time() >= deadline:
+                        if _stopping(deadline):
                             break
-                        page_text = page.get('text', '') if isinstance(page, dict) else page
-                        page_style = page.get('style') if isinstance(page, dict) else None
-                        page_speed = int(page.get('speed', 15)) if isinstance(page, dict) else 15
-                        page_delay = float(page.get('delay', eff_delay)) if isinstance(page, dict) else eff_delay
-
-                        max_dist = 0
-                        anim_style_ap = settings.get('anim_style','ltr') if is_anim else None
-                        eff_style_ap = (anim_style_ap or page_style or
-                                        (settings.get(f'plugin_{reg}_transition_style') if reg else None) or
-                                        settings.get('transition_style', 'ltr'))
-                        state.last_transition_style = eff_style_ap
-                        state.last_transition_speed = page_speed if page_speed is not None else int(settings.get('transition_speed', 15))
-                        if is_anim or page_text != state.last_sent_page:
-                            max_dist = _send_with_effect(page_text, page_style if not is_anim else anim_style_ap, page_speed, is_anim, app_id=reg)
-                            state.last_sent_page = page_text
-
-                        rotation_time = _rotation_time(max_dist)
-                        for _ in range(int(rotation_time * 10)):
-                            if state.stop_event.is_set() or time.time() >= deadline: break
-                            time.sleep(0.1)
-                        for _ in range(int(page_delay * 10)):
-                            if state.stop_event.is_set() or time.time() >= deadline: break
-                            time.sleep(0.1)
+                        if not _show_page(page, eff_delay, is_anim, reg,
+                                          deadline=deadline):
+                            break
 
                 state.active_app = None
 
@@ -187,51 +236,10 @@ def playlist_loop():
             eff_delay = float(settings.get('global_loop_delay', state.loop_delay))
 
         for page in display_pages:
-            if state.stop_event.is_set():
+            if _stopping():
                 break
-
-            # Resolve per-page settings — rich playlist objects vs. plain strings
-            if isinstance(page, dict):
-                page_text  = page.get('text', '')
-                page_delay = float(page.get('delay', eff_delay))
-                page_style = page.get('style')
-                page_speed = int(page.get('speed', 15))
-            else:
-                page_text  = page
-                page_delay = eff_delay
-                page_style = None
-                page_speed = 15
-
-            max_dist = 0
-            # Animations always resend each frame; other apps skip unchanged pages
-            anim_style = settings.get('anim_style', 'ltr') if is_anim else None
-            eff_style = anim_style or page_style or \
-                        (settings.get(f'plugin_{reg_key}_transition_style') if reg_key else None) or \
-                        settings.get('transition_style', 'ltr')
-            eff_speed = page_speed if page_speed is not None else int(settings.get('transition_speed', 15))
-            state.last_transition_style = eff_style
-            state.last_transition_speed = eff_speed
-            if is_anim or page_text != state.last_sent_page:
-                max_dist = _send_with_effect(page_text, anim_style or page_style, page_speed, is_anim, app_id=reg_key)
-                state.last_sent_page = page_text
-
-            # Skip rotation wait if manifest opts out (e.g. continuous random spin)
-            skip_rot = reg_key in _plugin_registry and _plugin_registry[reg_key].get('skip_rotation_wait')
-            if not skip_rot:
-                rotation_time = _rotation_time(max_dist)
-                for _ in range(int(rotation_time * 10)):
-                    if state.stop_event.is_set(): break
-                    time.sleep(0.1)
-
-            for _ in range(int(page_delay * 10)):
-                if state.stop_event.is_set(): break
-                time.sleep(0.1)
-
-            # Check for notification interrupts between pages
-            if settings.get('notify_enabled', False):
-                msg = _pop_notify()
-                if msg:
-                    _show_notify_message(msg)
+            if not _show_page(page, eff_delay, is_anim, reg_key):
+                break
 
         if state.stop_event.is_set():
             state.stop_event.clear()
