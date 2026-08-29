@@ -18,6 +18,9 @@ from splitflap.state import state
 from splitflap.tasks import start_background_task, start_supervised_loop
 
 
+DAY_NAMES = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']
+
+
 def _in_time_window(start, end, t):
     """Return True if time string t (HH:MM) is within [start, end). Supports overnight ranges."""
     if start <= end:
@@ -25,18 +28,35 @@ def _in_time_window(start, end, t):
     return t >= start or t < end  # overnight e.g. 22:00–07:00
 
 
+def _window_active(days, start, end, now):
+    """Is a day-scoped window active at `now`?
+
+    The chosen days are the days the window *starts* on, which is how the UI
+    reads: "Mondays, 22:00-07:00" runs from Monday evening through to Tuesday
+    morning. Scoping by the current day instead would end it at midnight.
+
+    The previous day is found arithmetically rather than by subtracting a
+    timedelta, which would land an hour out across a DST change and could
+    name the wrong weekday just after midnight.
+    """
+    t = now.strftime('%H:%M')
+    if not _in_time_window(start, end, t):
+        return False
+    weekday = now.weekday()
+    if start > end and t < end:
+        weekday = (weekday - 1) % 7   # the tail of a window that began yesterday
+    return DAY_NAMES[weekday] in days
+
+
 def _is_quiet_hours():
     """Return True if quiet hours are currently active."""
     if not settings.get('quiet_hours_enabled', False):
         return False
     tz = pytz.timezone(settings.get('timezone', 'US/Eastern'))
-    now = datetime.now(tz)
-    day = ['mon','tue','wed','thu','fri','sat','sun'][now.weekday()]
-    if day not in settings.get('quiet_hours_days', []):
-        return False
-    t = now.strftime('%H:%M')
-    return _in_time_window(settings.get('quiet_hours_start', '22:00'),
-                           settings.get('quiet_hours_end', '07:00'), t)
+    return _window_active(settings.get('quiet_hours_days', []),
+                          settings.get('quiet_hours_start', '22:00'),
+                          settings.get('quiet_hours_end', '07:00'),
+                          datetime.now(tz))
 
 
 def _schedule_tick():
@@ -65,16 +85,15 @@ def _schedule_tick():
     # Evaluate schedules
     tz = pytz.timezone(settings.get('timezone', 'US/Eastern'))
     now = datetime.now(tz)
-    day = ['mon','tue','wed','thu','fri','sat','sun'][now.weekday()]
-    t = now.strftime('%H:%M')
 
     matched = None
     for sched in settings.get('schedules', []):
         if not sched.get('enabled', True):
             continue
-        if day not in sched.get('days', []):
-            continue
-        if _in_time_window(sched.get('start_time', '00:00'), sched.get('end_time', '00:00'), t):
+        if _window_active(sched.get('days', []),
+                          sched.get('start_time', '00:00'),
+                          sched.get('end_time', '00:00'),
+                          now):
             matched = sched
             break
 
