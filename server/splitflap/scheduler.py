@@ -78,7 +78,9 @@ def _schedule_tick():
             matched = sched
             break
 
-    new_id = matched['id'] if matched else None
+    # /schedules stores whatever it is given, so a schedule without an id is
+    # possible; this runs in a loop thread where a KeyError costs the tick.
+    new_id = matched.get('id') if matched else None
     if new_id == state.active_schedule_id:
         return  # no change
 

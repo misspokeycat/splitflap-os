@@ -124,5 +124,40 @@ class SupervisedLoopTests(unittest.TestCase):
                 self.assertIn("start_supervised_loop(", src)
 
 
+class SchedulerRobustnessTests(unittest.TestCase):
+    """_schedule_tick runs in a loop thread, so anything it raises costs a
+    tick. /schedules stores whatever JSON it is handed."""
+
+    def test_a_schedule_without_an_id_does_not_raise(self):
+        from splitflap import scheduler
+        from splitflap.settings import settings
+        original = settings.get('schedules')
+        settings['schedules'] = [{
+            "enabled": True, "days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+            "start_time": "00:00", "end_time": "23:59",
+            "action": {"type": "off"}, "name": "no id here",
+        }]
+        try:
+            scheduler._schedule_tick()      # must not raise KeyError
+        finally:
+            if original is None:
+                settings.pop('schedules', None)
+            else:
+                settings['schedules'] = original
+
+    def test_a_malformed_schedule_entry_does_not_raise(self):
+        from splitflap import scheduler
+        from splitflap.settings import settings
+        original = settings.get('schedules')
+        settings['schedules'] = [{}, {"enabled": True}, {"enabled": True, "days": []}]
+        try:
+            scheduler._schedule_tick()
+        finally:
+            if original is None:
+                settings.pop('schedules', None)
+            else:
+                settings['schedules'] = original
+
+
 if __name__ == "__main__":
     unittest.main()
