@@ -9,7 +9,7 @@ import urllib.request
 from flask import Blueprint, jsonify, request
 from splitflap.settings import APPS_PATH, save_settings, settings
 from splitflap.state import state
-from splitflap.plugins import _plugin_registry, _plugin_triggers, _registry_cache, get_plugin_app_list, get_plugin_settings_config, load_installed_plugins
+from splitflap.plugins import is_valid_app_id, _plugin_registry, _plugin_triggers, _registry_cache, get_plugin_app_list, get_plugin_settings_config, load_installed_plugins
 from splitflap.mqtt import mqtt_publish_discovery
 from splitflap.triggers import _trigger_cooldowns
 from splitflap.sports import SPORTS_LEAGUES
@@ -43,6 +43,10 @@ def app_library_install():
     app_id = request.json.get("id", "").strip()
     if not app_id:
         return jsonify(status="error", message="No app ID"), 400
+    # app_id becomes a path below, and the server runs as root with no auth on
+    # this API. Anything that is not a plain app id is refused here.
+    if not is_valid_app_id(app_id):
+        return jsonify(status="error", message="Invalid app ID"), 400
     if app_id in _plugin_registry:
         return jsonify(status="error", message="Already installed"), 409
 
@@ -98,6 +102,8 @@ def app_library_uninstall():
     app_id = request.json.get("id", "").strip()
     if not app_id:
         return jsonify(status="error", message="No app ID"), 400
+    if not is_valid_app_id(app_id):
+        return jsonify(status="error", message="Invalid app ID"), 400
     if state.active_app in (app_id, f"plugin_{app_id}"):
         state.active_app = None
         state.stop_event.set()

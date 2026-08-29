@@ -13,6 +13,7 @@ app. There is no sandboxing.
 
 import importlib.util
 import json
+import re
 import logging
 import os
 import time
@@ -94,6 +95,18 @@ def _load_functional_module(app_id, app_dir):
             logging.info(f"Plugin {app_id}: trigger() loaded")
     except Exception as e:
         logging.error(f"Plugin {app_id}: error importing app.py: {e}")
+
+
+# An app id is a directory name under apps/. It reaches the filesystem from
+# request bodies, so it is restricted to what the shipped apps actually use:
+# letters, digits, hyphen, underscore, and it may not start with a dot or a
+# dash. That rules out separators, traversal and option-lookalikes.
+_APP_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+
+
+def is_valid_app_id(app_id):
+    """True if app_id is safe to join onto a path."""
+    return bool(app_id) and bool(_APP_ID_RE.fullmatch(app_id))
 
 
 def resolve_app_id(app_id):
