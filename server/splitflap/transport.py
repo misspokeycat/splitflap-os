@@ -181,6 +181,79 @@ def sync_hardware_data(mod_id):
     return False
 
 
+def parse_module_config(data):
+    """Pull what we can out of an ``A`` command response.
+
+    The documented layout is
+
+        ver:id:serial:offset:steps:autoHome:curIdx:tunedPairs:flapCount:charMap
+
+    but the field count varies between firmware builds — which is why
+    flapCount is *found* rather than indexed, by looking for a plausible value
+    at either of the two positions it has been seen at. Everything else is
+    then read at a fixed offset from it, so a shift in the leading fields
+    moves them all together and the parse still lines up.
+
+    Every field is validated and dropped if it does not make sense, because a
+    wrong current index is worse than no current index: the display would
+    compute rotations from a position the flap is not in.
+
+    Returns a dict of whatever was recognised; always has flap_count and
+    char_map when it returns non-empty.
+    """
+    parts = data.split(b':')
+
+    def candidate(anchor):
+        """What the response says if flapCount sits at `anchor`."""
+        if anchor >= len(parts) - 1:
+            return None
+        try:
+            flap_count = int(parts[anchor])
+        except ValueError:
+            return None
+        if not 1 <= flap_count <= 64:
+            return None
+        char_map_bytes = b':'.join(parts[anchor + 1:])
+        if not char_map_bytes:
+            return None
+        return anchor, flap_count, char_map_bytes.decode('cp1252', errors='replace')
+
+    candidates = [c for c in (candidate(a) for a in (8, 9)) if c]
+    if not candidates:
+        return {}
+
+    # A module's character map describes its flaps, so a reading where the two
+    # agree is the real one. Without this check a tunedPairs value that merely
+    # looks like a flap count wins the scan, and every field derived from that
+    # anchor is then off by one — including the flap position, which the
+    # display would rotate from.
+    consistent = [c for c in candidates if len(c[2]) == c[1]]
+    anchor, flap_count, char_map = (consistent or candidates)[0]
+    config = {"flap_count": flap_count, "char_map": char_map}
+    if not consistent:
+        # Anchor unconfirmed: report what the old parser reported and trust
+        # nothing positional beyond it.
+        return config
+
+    def field(offset, low, high):
+        index = anchor - offset
+        if index < 0:
+            return None
+        try:
+            value = int(parts[index])
+        except (ValueError, IndexError):
+            return None
+        return value if low <= value <= high else None
+
+    auto_home = field(3, 0, 1)
+    if auto_home is not None:
+        config["auto_home"] = bool(auto_home)
+    current_index = field(2, 0, flap_count - 1)
+    if current_index is not None:
+        config["current_index"] = current_index
+    return config
+
+
 def sync_module_config(mod_id):
     """Query module's A command for flap count and character map (Universal Firmware v31+)."""
     if not state.ser:
@@ -200,32 +273,31 @@ def sync_module_config(mod_id):
                     if target in buffer and b'\n' in buffer[buffer.find(target):]:
                         line = buffer[buffer.find(target):].split(b'\n')[0]
                         data = line.split(b'A:', 1)[1]
-                        # Format: ver:id:serial:offset:steps:autoHome:curIdx:tunedPairs:flapCount:charMap
-                        parts = data.split(b':')
-                        flap_count = None
-                        char_map_bytes = None
-                        for fc_idx in (8, 9):
-                            if fc_idx < len(parts) - 1:
-                                try:
-                                    fc = int(parts[fc_idx])
-                                    if 1 <= fc <= 64:
-                                        flap_count = fc
-                                        char_map_bytes = b':'.join(parts[fc_idx + 1:])
-                                        break
-                                except ValueError:
-                                    continue
-                        if flap_count and char_map_bytes:
-                            char_map = char_map_bytes.decode('cp1252', errors='replace')
-                            if "module_configs" not in settings:
-                                settings["module_configs"] = {}
-                            settings["module_configs"][str(mod_id)] = {
-                                "flap_count": flap_count,
-                                "char_map": char_map,
+                        logging.debug("Module %d A response: %r", mod_id, data)
+                        config = parse_module_config(data)
+                        if config:
+                            settings.setdefault("module_configs", {})[str(mod_id)] = {
+                                "flap_count": config["flap_count"],
+                                "char_map": config["char_map"],
                             }
                             save_settings(settings)
+                            # The module reports where its flap actually is, so
+                            # take its word for it rather than leaving the
+                            # position unknown and rotating the long way round.
+                            if "current_index" in config and mod_id < len(state.current_indices):
+                                state.current_indices[mod_id] = config["current_index"]
+                            if config.get("auto_home") is not None:
+                                wanted = bool(settings.get('auto_home', True))
+                                if config["auto_home"] != wanted:
+                                    logging.warning(
+                                        "Module %d reports auto-home %s but the setting is %s; "
+                                        "re-applying", mod_id,
+                                        "on" if config["auto_home"] else "off",
+                                        "on" if wanted else "off")
+                                    send_raw(f"m**a{1 if wanted else 0}")
                             return True
                         else:
-                            logging.warning(f"Module {mod_id} A response: could not find flap_count in {len(parts)} fields")
+                            logging.warning(f"Module {mod_id} A response: could not find flap_count in {data.count(b':') + 1} fields")
                 except Exception as e:
                     logging.error(f"A command parse error: {e}")
             time.sleep(0.05)
