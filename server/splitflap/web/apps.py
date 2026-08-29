@@ -9,6 +9,7 @@ import urllib.request
 from flask import Blueprint, jsonify, request
 from splitflap.settings import APPS_PATH, save_settings, settings
 from splitflap.state import state
+from splitflap.web.params import as_str
 from splitflap.plugins import is_valid_app_id, _plugin_registry, _plugin_triggers, _registry_cache, get_plugin_app_list, get_plugin_settings_config, load_installed_plugins
 from splitflap.mqtt import mqtt_publish_discovery
 from splitflap.triggers import _trigger_cooldowns
@@ -40,7 +41,7 @@ def app_library():
 
 @bp.route('/app_library/install', methods=['POST'])
 def app_library_install():
-    app_id = request.json.get("id", "").strip()
+    app_id = as_str(request.json.get("id"))
     if not app_id:
         return jsonify(status="error", message="No app ID"), 400
     # app_id becomes a path below, and the server runs as root with no auth on
@@ -99,7 +100,7 @@ def app_library_install():
 
 @bp.route('/app_library/uninstall', methods=['POST'])
 def app_library_uninstall():
-    app_id = request.json.get("id", "").strip()
+    app_id = as_str(request.json.get("id"))
     if not app_id:
         return jsonify(status="error", message="No app ID"), 400
     if not is_valid_app_id(app_id):

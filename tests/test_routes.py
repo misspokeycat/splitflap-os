@@ -257,5 +257,51 @@ class WriteRouteSmokeTests(RouteSmokeTestCase):
         self.assertEqual(state.current_display_string, " " * get_module_count())
 
 
+class MalformedInputTests(RouteSmokeTestCase):
+    """Every write route, against payloads the UI would never send.
+
+    A 400 is a fine answer and so is a 200; a 500 means the handler raised on
+    input it should have rejected. This found five routes at once — a present
+    but null "id" is not a missing "id", so .get("id", "") returns None and
+    .strip() raises, and int(None) does the same a line later.
+    """
+
+    # Deliberately excluded: it restarts the service.
+    UNSAFE = {"/apply_update"}
+
+    PAYLOADS = [
+        {},
+        {"action": "nonsense"},
+        {"id": None},
+        {"id": []},
+        {"id": {"nested": 1}},
+        {"name": None},
+        {"enabled": "yes"},
+        {"pages": "not-a-list"},
+        {"schedules": "nope"},
+        {"triggers": 5},
+        {"entries": "x"},
+        {"app": 123},
+        {"text": None},
+        {"port": None},
+    ]
+
+    def test_no_write_route_raises_on_malformed_input(self):
+        routes = [
+            (rule, method)
+            for rule, _, methods in EXPECTED_ROUTES
+            for method in methods.split(",")
+            if method in ("POST", "DELETE")
+            and "<" not in rule
+            and rule not in self.UNSAFE
+        ]
+        self.assertGreater(len(routes), 20, "route inventory looks wrong")
+        for rule, method in sorted(routes):
+            for payload in self.PAYLOADS:
+                with self.subTest(route=f"{method} {rule}", payload=payload):
+                    response = self.http.open(rule, method=method, json=payload)
+                    self.assertNotCrashed(response, f"{method} {rule} {payload}")
+
+
 if __name__ == "__main__":
     unittest.main()

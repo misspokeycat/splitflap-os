@@ -7,39 +7,13 @@ from flask import Blueprint, jsonify, request
 from splitflap.settings import get_flap_chars, get_module_char_map, get_module_flap_count, save_settings, settings
 from splitflap.grid import get_cols, get_module_count, get_rows
 from splitflap.state import resize_grid, state
+from splitflap.web.params import as_int as _as_int, module_id as _module_id
 from splitflap.transport import send_raw, serial_lock, sync_hardware_data, sync_module_config
 from splitflap.display import send_to_display
 from splitflap.mqtt import mqtt_publish_discovery
 from tuning import build_tuning_adjust_commands
 
 bp = Blueprint("tuning", __name__)
-
-
-def _module_id(raw):
-    """Parse an addressable module id, or None.
-
-    Module ids come from request bodies and are used both to index the display
-    buffers and to build serial commands, so an id outside the grid is not a
-    harmless no-op: it used to raise IndexError, after already putting a
-    malformed frame like "m999h" on the wire.
-    """
-    try:
-        mod_id = int(raw)
-    except (TypeError, ValueError):
-        return None
-    if not 0 <= mod_id < get_module_count():
-        return None
-    return mod_id
-
-
-def _as_int(raw, default=0):
-    """Parse an integer field from a request body, or None if it is not one."""
-    if raw is None:
-        return default
-    try:
-        return int(raw)
-    except (TypeError, ValueError):
-        return None
 
 
 @bp.route('/settings', methods=['GET', 'POST'])
@@ -158,7 +132,9 @@ def custom_tune():
 
 @bp.route('/sync_module', methods=['POST'])
 def sync_module():
-    mod_id  = int(request.json.get('id', 0))
+    mod_id = _module_id(request.json.get('id', 0))
+    if mod_id is None:
+        return jsonify(error="Unknown module"), 400
     success = sync_hardware_data(mod_id)
     sync_module_config(mod_id)
     return jsonify(status="success" if success else "failed", settings=settings)
@@ -172,7 +148,12 @@ def sync_all():
 
 @bp.route('/assign_id', methods=['POST'])
 def assign_id():
-    send_raw(f"m**i{int(request.json.get('id', 0)):02d}")
+    # The id is formatted as %02d into a serial frame, so it has to be a
+    # number the firmware can actually address.
+    new_id = _as_int(request.json.get('id'), 0)
+    if new_id is None or not 0 <= new_id <= 99:
+        return jsonify(error="Module id must be between 0 and 99"), 400
+    send_raw(f"m**i{new_id:02d}")
     return jsonify(status="ID Assigned")
 
 @bp.route('/toggle_autohome', methods=['POST'])

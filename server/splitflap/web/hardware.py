@@ -5,6 +5,7 @@ from flask import Blueprint, jsonify, request
 from splitflap.settings import save_settings, settings
 from splitflap.grid import get_module_count
 from splitflap.state import state
+from splitflap.web.params import as_str
 from splitflap.transport import open_gateway, open_serial, serial_lock, universal_firmware
 from hardware.universal_firmware import UniversalFirmwareError
 
@@ -32,7 +33,9 @@ def set_serial_port():
     'serial' (in case the gateway was previously selected).
     """
     data = request.json
-    new_port = data.get('port', '').strip()
+    new_port = as_str(data.get('port'))
+    if not new_port:
+        return jsonify(status="error", message="No port given"), 400
     if not new_port:
         return jsonify(status="error", message="No port specified"), 400
 

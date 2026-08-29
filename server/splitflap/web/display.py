@@ -50,8 +50,11 @@ def update_playlist():
 
 @bp.route('/run_app', methods=['POST'])
 def run_app():
+    requested = request.json.get('app')
+    if requested is not None and not isinstance(requested, str):
+        return jsonify(error="'app' must be a string"), 400
     state.active_app_playlist = None
-    state.active_app   = request.json.get('app')
+    state.active_app = requested
 
     state.loop_delay = loop_delay_for(state.active_app)
 
