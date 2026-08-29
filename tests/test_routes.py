@@ -220,6 +220,22 @@ class GetRouteSmokeTests(RouteSmokeTestCase):
         self.assertEqual((body["rows"], body["cols"]), (3, 15))
         self.assertEqual(len(body["state"]), 45)
 
+    def test_current_state_reports_the_auto_home_setting(self):
+        # The UI needs this to decide whether to prompt for homing: with
+        # auto-home on, the modules do it themselves at power-up and the
+        # "HOMING REQUIRED" overlay is just noise.
+        from splitflap.settings import settings as cfg
+        cfg['auto_home'] = True
+        self.assertIs(self.http.get("/current_state").get_json()["auto_home"], True)
+        cfg['auto_home'] = False
+        self.assertIs(self.http.get("/current_state").get_json()["auto_home"], False)
+
+    def test_toggling_auto_home_pushes_the_flag_to_the_modules(self):
+        self.http.post("/toggle_autohome", json={"enabled": True})
+        self.assertIn("m**a1", self.sent)
+        self.http.post("/toggle_autohome", json={"enabled": False})
+        self.assertIn("m**a0", self.sent)
+
     def test_grid_config_matches_current_state(self):
         self.set_grid(4, 20)
         grid = self.http.get("/grid_config").get_json()

@@ -325,7 +325,10 @@ setInterval(()=>{
     // Homing overlay (single, hide in sim mode)
     const homingEl = document.getElementById('homing-control');
     if(homingEl){
-      if(data.is_homed || data.sim_mode){ homingEl.style.display='none'; }
+      // With auto-home on, the modules home themselves at power-up, so there
+      // is nothing to prompt for. Keep the no-device warning either way.
+      const selfHoming = data.auto_home && data.hardware_connected;
+      if(data.is_homed || data.sim_mode || selfHoming){ homingEl.style.display='none'; }
       else {
         homingEl.style.display='flex';
         homingEl.innerHTML = data.hardware_connected

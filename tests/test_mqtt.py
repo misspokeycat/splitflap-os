@@ -194,9 +194,15 @@ class HomeButtonTests(SplitflapTestCase):
         self.assertTrue(state.stop_event.is_set())
 
 
-class AutoHomeOnBootTests(SplitflapTestCase):
-    """auto_home was only ever read by /toggle_autohome; nothing consulted it
-    at startup, so 'Auto-Home on Boot' did nothing."""
+class AutoHomeSettingTests(SplitflapTestCase):
+    """Auto-home is a module firmware mode, not something the server does.
+
+    When it is on, each module homes itself as it powers up. The flag lives in
+    module RAM and is lost on every power cycle, so the server re-asserts it at
+    startup — that is the whole job. An earlier version of this also sent
+    "m**h", which homed all 45 modules on every service restart: a twelve
+    second flap storm for something the modules had already done themselves.
+    """
 
     def setUp(self):
         super().setUp()
@@ -205,31 +211,31 @@ class AutoHomeOnBootTests(SplitflapTestCase):
         state.current_indices = [7] * get_module_count()
         state.current_display_string = "X" * get_module_count()
 
-    def test_homes_when_enabled(self):
-        settings["auto_home"] = True
-        self.assertTrue(startup.apply_auto_home_on_boot())
-        self.assertEqual(self.sent, ["m**a1", "m**h"])
-        self.assertTrue(state.is_homed)
-        self.assertEqual(state.current_indices, [0] * get_module_count())
-        self.assertEqual(state.current_display_string, " " * get_module_count())
+    def test_the_flag_is_asserted_when_enabled(self):
+        settings['auto_home'] = True
+        self.assertTrue(startup.apply_auto_home_setting())
+        self.assertEqual(self.sent, ["m**a1"])
 
-    def test_reasserts_the_firmware_flag_without_homing_when_disabled(self):
-        settings["auto_home"] = False
-        self.assertFalse(startup.apply_auto_home_on_boot())
+    def test_the_flag_is_cleared_when_disabled(self):
+        settings['auto_home'] = False
+        self.assertFalse(startup.apply_auto_home_setting())
         self.assertEqual(self.sent, ["m**a0"])
+
+    def test_nothing_is_homed_on_startup(self):
+        settings['auto_home'] = True
+        startup.apply_auto_home_setting()
+        self.assertNotIn("m**h", self.sent)
+
+    def test_the_display_state_is_left_alone(self):
+        # The server cannot know whether the modules power-cycled, so it must
+        # not claim to know where the flaps are.
+        settings['auto_home'] = True
+        startup.apply_auto_home_setting()
         self.assertFalse(state.is_homed)
         self.assertEqual(state.current_display_string, "X" * get_module_count())
+        self.assertEqual(state.current_indices, [7] * get_module_count())
 
-    def test_homing_is_reported_over_mqtt(self):
-        settings["auto_home"] = True
-        startup.apply_auto_home_on_boot()
-        self.assertEqual(
-            self.client.last(mqtt.MQTT_STATUS_STATE), " " * get_module_count()
-        )
-
-    def test_auto_home_is_registered_as_a_startup_task(self):
-        # Source-level guard: the reported bug was that no startup task
-        # consulted the setting at all.
+    def test_it_is_registered_as_a_startup_task(self):
         self.assertIn("start_background_task(_startup_auto_home)", SOURCE)
 
 

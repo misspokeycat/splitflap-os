@@ -1,7 +1,7 @@
 """Display state and playback control."""
 
 from flask import Blueprint, jsonify, render_template, request
-from splitflap.settings import read_version
+from splitflap.settings import read_version, settings
 from splitflap.grid import get_cols, get_module_count, get_rows, layout_text
 from splitflap.state import state
 from splitflap.transport import send_raw
@@ -23,6 +23,7 @@ def current_state():
                    active_app_playlist=state.active_app_playlist is not None,
                    app_playlist_name=state.app_playlist_name,
                    rows=get_rows(), cols=get_cols(), sim_mode=state.sim_mode, hardware_connected=state.ser is not None,
+                   auto_home=bool(settings.get('auto_home', True)),
                    transition_style=state.last_transition_style,
                    transition_speed=state.last_transition_speed)
 
