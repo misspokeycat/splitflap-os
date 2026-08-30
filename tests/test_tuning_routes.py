@@ -137,5 +137,96 @@ class RestoreTests(SplitflapTestCase):
         self.assertEqual(self.http.post("/restore_settings", json={}).status_code, 400)
 
 
+class ModuleAuditTests(SplitflapTestCase):
+    """Comparing module EEPROM against settings.json, without writing either."""
+
+    def setUp(self):
+        super().setUp()
+        app.app.config["TESTING"] = False
+        self.http = app.app.test_client()
+        self.set_grid(3, 15)
+        settings['calibrations']['0'] = 4096
+        settings['offsets']['0'] = 2832
+        settings['tuned_chars']['0'] = {'3': 120}
+        state.ser = object()          # pretend a module is attached
+        self.readings = {}
+        self.patch_everywhere("read_hardware_data", lambda i: self.readings.get(i))
+
+    def audit(self, ids=(0,)):
+        return self.http.post("/module_audit", json={"ids": list(ids)}).get_json()
+
+    def test_a_module_that_agrees_is_ok(self):
+        self.readings[0] = {"offset": 2832, "calibration": 4096, "tuned": {"3": 120}}
+        self.assertEqual(self.audit()["modules"][0]["status"], "ok")
+
+    def test_a_differing_offset_is_reported(self):
+        self.readings[0] = {"offset": 2900, "calibration": 4096, "tuned": {"3": 120}}
+        entry = self.audit()["modules"][0]
+        self.assertEqual(entry["status"], "diverged")
+        self.assertEqual(entry["diverged"]["offset"], {"module": 2900, "ours": 2832})
+
+    def test_an_out_of_range_step_is_reported_as_suspect(self):
+        self.readings[0] = {"offset": 2832, "calibration": 4096,
+                            "tuned": {"3": 120, "9": 60000}}
+        entry = self.audit()["modules"][0]
+        self.assertEqual(entry["rejected"]["tuned"], {"9": 60000})
+
+    def test_an_erased_calibration_is_reported_as_suspect(self):
+        self.readings[0] = {"offset": 2832, "calibration": 65535, "tuned": {"3": 120}}
+        entry = self.audit()["modules"][0]
+        self.assertEqual(entry["status"], "suspect")
+        self.assertEqual(entry["rejected"]["calibration"], 65535)
+
+    def test_a_silent_module_is_reported(self):
+        entry = self.audit()["modules"][0]
+        self.assertEqual(entry["status"], "no_response")
+
+    def test_every_entry_has_the_same_shape(self):
+        self.readings[1] = {"offset": 2832, "calibration": 4096, "tuned": {}}
+        for entry in self.audit(ids=(0, 1))["modules"]:
+            with self.subTest(module=entry["id"]):
+                self.assertEqual(set(entry), {"id", "status", "rejected", "diverged"})
+
+    def test_the_audit_writes_nothing(self):
+        self.readings[0] = {"offset": 2900, "calibration": 4096, "tuned": {"9": 60000}}
+        self.audit()
+        self.assertEqual(settings['offsets']['0'], 2832)
+        self.assertEqual(settings['tuned_chars']['0'], {'3': 120})
+        self.assertEqual(self.sent, [], "the audit talked to the module bus")
+
+    def test_it_refuses_when_no_hardware_is_attached(self):
+        state.ser = None
+        self.assertEqual(
+            self.http.post("/module_audit", json={"ids": [0]}).status_code, 409)
+
+    def test_it_refuses_a_bad_module_list(self):
+        for bad in ("all", [999], [None], 5):
+            with self.subTest(ids=bad):
+                response = self.http.post("/module_audit", json={"ids": bad})
+                self.assertEqual(response.status_code, 400)
+
+
+class TunedStepRangeTests(SplitflapTestCase):
+    def setUp(self):
+        super().setUp()
+        app.app.config["TESTING"] = False
+        self.http = app.app.test_client()
+        self.set_grid(3, 15)
+        settings['calibrations']['0'] = 4096
+
+    def test_a_step_beyond_one_revolution_is_refused(self):
+        # auto_tune already clamps to this; custom_tune stored anything.
+        response = self.http.post("/custom_tune", json={
+            "action": "save", "id": 0, "index": 3, "step": 65535})
+        self.assertEqual(response.status_code, 400)
+        self.assertNotIn("3", settings['tuned_chars'].get('0', {}))
+
+    def test_the_last_valid_step_is_accepted(self):
+        response = self.http.post("/custom_tune", json={
+            "action": "save", "id": 0, "index": 3, "step": 4095})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(settings['tuned_chars']['0']['3'], 4095)
+
+
 if __name__ == "__main__":
     unittest.main()

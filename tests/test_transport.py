@@ -19,7 +19,12 @@ import unittest
 
 from support import app  # noqa: F401  (sets up sys.path)
 
-from splitflap.transport import parse_module_config
+from splitflap.transport import (
+    ERASED,
+    parse_hardware_data,
+    parse_module_config,
+    sanitise_module_data,
+)
 
 CHARS = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$&()-+=;q:%'.,/?*roygbpw"
 
@@ -106,6 +111,103 @@ class ParseTests(unittest.TestCase):
 
     def test_a_missing_character_map_is_refused(self):
         self.assertEqual(parse_module_config(response(char_map="")), {})
+
+
+class HardwareDataParseTests(unittest.TestCase):
+    """The `d` (dump) response: offset:calibration:tuned pairs."""
+
+    def test_reads_offset_and_calibration(self):
+        reading = parse_hardware_data("2832:4096")
+        self.assertEqual((reading["offset"], reading["calibration"]), (2832, 4096))
+        self.assertEqual(reading["tuned"], {})
+
+    def test_reads_tuned_pairs(self):
+        reading = parse_hardware_data("2832:4096:3=120,7=430")
+        self.assertEqual(reading["tuned"], {"3": 120, "7": 430})
+
+    def test_a_malformed_pair_is_skipped_not_fatal(self):
+        reading = parse_hardware_data("2832:4096:3=120,broken,7=x,9=440")
+        self.assertEqual(reading["tuned"], {"3": 120, "9": 440})
+
+    def test_a_short_response_is_refused(self):
+        self.assertIsNone(parse_hardware_data("2832"))
+
+    def test_a_non_numeric_response_is_refused(self):
+        self.assertIsNone(parse_hardware_data("garbage:more"))
+
+
+class SanitiseTests(unittest.TestCase):
+    """Unwritten EEPROM reads as 0xFFFF, and this codebase already uses that
+    as its "no tuning stored" sentinel — `w<idx>:65535` is the erase command.
+    A module reporting it means "never tuned", and storing it as a real
+    position would later send the module to a step it cannot reach."""
+
+    def reading(self, offset=2832, calibration=4096, tuned=None):
+        return {"offset": offset, "calibration": calibration, "tuned": tuned or {}}
+
+    def test_good_data_passes_through(self):
+        clean, rejected = sanitise_module_data(self.reading(tuned={"3": 120}))
+        self.assertEqual(clean["offset"], 2832)
+        self.assertEqual(clean["calibration"], 4096)
+        self.assertEqual(clean["tuned"], {"3": 120})
+        self.assertEqual(rejected, {})
+
+    def test_the_erased_sentinel_is_not_a_tuned_position(self):
+        clean, rejected = sanitise_module_data(self.reading(tuned={"3": ERASED}))
+        self.assertEqual(clean["tuned"], {})
+        self.assertNotIn("tuned", rejected, "'never tuned' is not a rejection")
+
+    def test_a_step_beyond_one_revolution_is_dropped(self):
+        clean, rejected = sanitise_module_data(
+            self.reading(calibration=4096, tuned={"3": 120, "4": 9000}))
+        self.assertEqual(clean["tuned"], {"3": 120})
+        self.assertEqual(rejected["tuned"], {"4": 9000})
+
+    def test_a_negative_step_is_dropped(self):
+        clean, rejected = sanitise_module_data(self.reading(tuned={"3": -5}))
+        self.assertEqual(clean["tuned"], {})
+        self.assertEqual(rejected["tuned"], {"3": -5})
+
+    def test_an_offset_beyond_one_revolution_is_dropped(self):
+        clean, rejected = sanitise_module_data(self.reading(offset=70000))
+        self.assertNotIn("offset", clean)
+        self.assertEqual(rejected["offset"], 70000)
+
+    # ── the calibration is the dangerous one: restore writes it back ──
+    def test_an_erased_calibration_falls_back_to_what_we_have(self):
+        clean, rejected = sanitise_module_data(
+            self.reading(calibration=ERASED), stored_calibration=4096)
+        self.assertEqual(clean["calibration"], 4096)
+        self.assertEqual(rejected["calibration"], ERASED)
+
+    def test_a_zero_calibration_falls_back_to_what_we_have(self):
+        clean, _ = sanitise_module_data(
+            self.reading(calibration=0), stored_calibration=4096)
+        self.assertEqual(clean["calibration"], 4096)
+
+    def test_nothing_is_usable_without_any_calibration(self):
+        clean, rejected = sanitise_module_data(
+            self.reading(calibration=ERASED), stored_calibration=None)
+        self.assertIsNone(clean)
+        self.assertEqual(rejected["calibration"], ERASED)
+
+    def test_steps_are_judged_against_the_fallback_calibration(self):
+        # A module whose calibration is garbage still has its tuned values
+        # checked, against the calibration we kept.
+        clean, rejected = sanitise_module_data(
+            self.reading(calibration=ERASED, tuned={"3": 120, "4": 5000}),
+            stored_calibration=4096)
+        self.assertEqual(clean["tuned"], {"3": 120})
+        self.assertEqual(rejected["tuned"], {"4": 5000})
+
+    def test_a_wholly_erased_module_yields_nothing_but_is_not_fatal(self):
+        clean, rejected = sanitise_module_data(
+            self.reading(offset=ERASED, calibration=ERASED,
+                         tuned={"0": ERASED, "1": ERASED}),
+            stored_calibration=4096)
+        self.assertEqual(clean["tuned"], {})
+        self.assertNotIn("offset", clean)
+        self.assertEqual(clean["calibration"], 4096)
 
 
 if __name__ == "__main__":

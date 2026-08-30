@@ -8,7 +8,14 @@ from splitflap.settings import get_flap_chars, get_module_char_map, get_module_f
 from splitflap.grid import get_cols, get_module_count, get_rows
 from splitflap.state import resize_grid, state
 from splitflap.web.params import as_int as _as_int, module_id as _module_id
-from splitflap.transport import send_raw, serial_lock, sync_hardware_data, sync_module_config
+from splitflap.transport import (
+    read_hardware_data,
+    sanitise_module_data,
+    send_raw,
+    serial_lock,
+    sync_hardware_data,
+    sync_module_config,
+)
 from splitflap.display import send_to_display
 from splitflap.mqtt import mqtt_publish_discovery
 from tuning import build_tuning_adjust_commands
@@ -114,6 +121,12 @@ def custom_tune():
         step = _as_int(data.get('step'), 0)
         if idx is None or step is None:
             return jsonify(error="'step' and 'index' must be numbers"), 400
+        # A tuned step is a position within one revolution. auto_tune already
+        # clamps to this; storing anything outside it would write a position
+        # the module cannot reach into EEPROM.
+        cal = int(settings['calibrations'].get(str(mod_id), 4096))
+        if not 0 <= step < cal:
+            return jsonify(error=f"Step must be between 0 and {cal - 1}"), 400
         send_raw(f"m{mod_id:02d}w{idx}:{step}")
         settings['tuned_chars'].setdefault(str(mod_id), {})[str(idx)] = step
         save_settings(settings)
@@ -334,3 +347,66 @@ def restore_settings():
                    modules_updated=get_module_count())
 
 # ── Saved Playlists ──────────────────────────────────────────
+
+
+@bp.route('/module_audit', methods=['POST'])
+def module_audit():
+    """Compare what the modules have stored against what we have stored.
+
+    Read-only: nothing is written to the modules or to settings.json. Each
+    module is asked for its settings and the reading is reported three ways —
+    values that cannot be right, values that disagree with ours, and the rest.
+
+    EEPROM drifts. A write interrupted by a brownout (the motors draw hardest
+    exactly when a write lands) leaves a half-written cell, and an unwritten
+    one reads as 65535. This is how you find out which modules have a problem
+    without changing anything.
+    """
+    data = request.json or {}
+    ids = data.get('ids')
+    if ids is None:
+        ids = list(range(get_module_count()))
+    if not isinstance(ids, list) or not all(_module_id(i) is not None for i in ids):
+        return jsonify(error="'ids' must be a list of module ids"), 400
+    if not state.ser:
+        return jsonify(error="No hardware connected"), 409
+
+    report = []
+    for mod_id in (_module_id(i) for i in ids):
+        key = str(mod_id)
+        reading = read_hardware_data(mod_id)
+        if reading is None:
+            # Same shape as every other entry: a caller iterating the report
+            # should not have to special-case the module that did not answer.
+            report.append({"id": mod_id, "status": "no_response",
+                           "rejected": {}, "diverged": {}})
+            continue
+        clean, rejected = sanitise_module_data(
+            reading, settings['calibrations'].get(key))
+
+        diverged = {}
+        if clean is not None:
+            ours_cal = int(settings['calibrations'].get(key, 4096))
+            if clean["calibration"] != ours_cal:
+                diverged["calibration"] = {"module": clean["calibration"], "ours": ours_cal}
+            if "offset" in clean:
+                ours_offset = int(settings['offsets'].get(key, 2832))
+                if clean["offset"] != ours_offset:
+                    diverged["offset"] = {"module": clean["offset"], "ours": ours_offset}
+            ours_tuned = {str(k): int(v) for k, v in
+                          settings['tuned_chars'].get(key, {}).items()}
+            if clean["tuned"] != ours_tuned:
+                diverged["tuned"] = {"module": clean["tuned"], "ours": ours_tuned}
+
+        report.append({
+            "id": mod_id,
+            "status": "unusable" if clean is None else ("diverged" if diverged
+                                                        else ("suspect" if rejected else "ok")),
+            "rejected": rejected,
+            "diverged": diverged,
+        })
+
+    counts = {}
+    for entry in report:
+        counts[entry["status"]] = counts.get(entry["status"], 0) + 1
+    return jsonify(modules=report, summary=counts)

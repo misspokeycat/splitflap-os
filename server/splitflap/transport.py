@@ -145,9 +145,79 @@ def send_raw(cmd):
             state.ser.flush()
             time.sleep(0.02)
 
-def sync_hardware_data(mod_id):
+# Unwritten EEPROM reads as 0xFFFF, and this codebase already uses that value
+# as its "no tuning stored" sentinel — `w<idx>:65535` is the erase command. So
+# a module reporting 65535 is almost always saying "never tuned", not
+# "corrupt", and it must never be stored as though it were a real position.
+ERASED = 65535
+
+
+def parse_hardware_data(data):
+    """Parse a ``d`` (dump) response into offset, calibration and tuned steps.
+
+    Returns None if it is not a response we recognise. No validation here —
+    that is sanitise_module_data's job, so the raw reading stays available for
+    comparison against what we have stored.
+    """
+    parts = data.split(':')
+    if len(parts) < 2:
+        return None
+    try:
+        reading = {"offset": int(parts[0]), "calibration": int(parts[1]), "tuned": {}}
+    except ValueError:
+        return None
+    if len(parts) >= 3 and parts[2]:
+        for pair in parts[2].split(','):
+            if '=' not in pair:
+                continue
+            index, value = pair.split('=', 1)
+            try:
+                reading["tuned"][index.strip()] = int(value)
+            except ValueError:
+                continue
+    return reading
+
+
+def sanitise_module_data(reading, stored_calibration=None):
+    """Drop values a module cannot actually have meant.
+
+    A step is a position within one revolution, so anything at or beyond the
+    calibration is meaningless, and the erased sentinel means "not set". A
+    garbage calibration is the dangerous one: it is written back to the module
+    on restore, so a bad reading must not displace a good stored value.
+
+    Returns (clean, rejected) where rejected explains what was dropped.
+    """
+    rejected = {}
+    calibration = reading.get("calibration")
+    if calibration is None or calibration <= 0 or calibration == ERASED:
+        rejected["calibration"] = calibration
+        calibration = stored_calibration
+    if not calibration or calibration <= 0:
+        return None, rejected          # nothing can be validated without it
+
+    clean = {"calibration": calibration, "tuned": {}}
+
+    offset = reading.get("offset")
+    if offset is None or not 0 <= offset < calibration:
+        rejected["offset"] = offset
+    else:
+        clean["offset"] = offset
+
+    for index, step in reading.get("tuned", {}).items():
+        if step == ERASED:
+            continue               # "not tuned" is not a rejection
+        if 0 <= step < calibration:
+            clean["tuned"][index] = step
+        else:
+            rejected.setdefault("tuned", {})[index] = step
+    return clean, rejected
+
+
+def read_hardware_data(mod_id):
+    """Ask a module for its stored settings. Returns a reading, or None."""
     if not state.ser:
-        return False
+        return None
     with serial_lock:
         state.ser.reset_input_buffer()
         state.ser.write(f"m{mod_id:02d}d\n".encode())
@@ -158,27 +228,38 @@ def sync_hardware_data(mod_id):
         while time.time() - start < 5.0:
             if state.ser.in_waiting > 0:
                 try:
-                    chunk = state.ser.read(state.ser.in_waiting).decode('utf-8', errors='ignore')
-                    buffer += chunk
+                    buffer += state.ser.read(state.ser.in_waiting).decode('utf-8', errors='ignore')
                     if target in buffer and '\n' in buffer[buffer.find(target):]:
-                        valid_part = buffer[buffer.find(target):].split('\n')[0]
-                        data = valid_part.split('d:', 1)[1]
-                        parts = data.split(':')
-                        if len(parts) >= 2:
-                            settings['offsets'][str(mod_id)] = int(parts[0])
-                            settings['calibrations'][str(mod_id)] = int(parts[1])
-                            settings['tuned_chars'][str(mod_id)] = {}
-                            if len(parts) == 3 and parts[2]:
-                                for p in parts[2].split(','):
-                                    if '=' in p:
-                                        idx, val = p.split('=')
-                                        settings['tuned_chars'][str(mod_id)][idx] = int(val)
-                            save_settings(settings)
-                            return True
+                        line = buffer[buffer.find(target):].split('\n')[0]
+                        return parse_hardware_data(line.split('d:', 1)[1])
                 except Exception as e:
                     logging.error(f"Parse error: {e}")
+                    return None
             time.sleep(0.05)
-    return False
+    return None
+
+
+def sync_hardware_data(mod_id):
+    """Read a module's stored settings into ours, discarding nonsense."""
+    reading = read_hardware_data(mod_id)
+    if reading is None:
+        return False
+    key = str(mod_id)
+    stored_calibration = settings['calibrations'].get(key)
+    clean, rejected = sanitise_module_data(reading, stored_calibration)
+    if clean is None:
+        logging.error("Module %s reported an unusable calibration (%s); keeping ours",
+                      mod_id, rejected.get("calibration"))
+        return False
+    if rejected:
+        logging.warning("Module %s: ignoring implausible EEPROM values %s", mod_id, rejected)
+
+    settings['calibrations'][key] = clean["calibration"]
+    if "offset" in clean:
+        settings['offsets'][key] = clean["offset"]
+    settings['tuned_chars'][key] = clean["tuned"]
+    save_settings(settings)
+    return True
 
 
 def parse_module_config(data):

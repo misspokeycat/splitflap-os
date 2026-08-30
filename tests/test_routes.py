@@ -41,6 +41,7 @@ EXPECTED_ROUTES = [
     ("/installed_apps", "apps.installed_apps", "GET"),
     ("/location_search", "search.location_search_route", "GET"),
     ("/location_timezone", "search.location_timezone_route", "GET"),
+    ("/module_audit", "tuning.module_audit", "POST"),
     ("/mqtt_reconnect", "network.mqtt_reconnect_route", "POST"),
     ("/network_config", "network.network_config", "POST"),
     ("/network_status", "network.network_status", "GET"),
@@ -119,6 +120,7 @@ WRITE_CALLS = [
     ("POST", "/notify", {"message": "HELLO"}),
     ("DELETE", "/notify", None),
     ("POST", "/sports_follow", {"league": "nfl", "teams": []}),
+    ("POST", "/module_audit", {"ids": [0]}),
     ("POST", "/mqtt_reconnect", {}),
     ("POST", "/universal/scan", {}),
 ]

@@ -186,6 +186,33 @@ Other endpoints:
 | `GET /grid_config` | `{rows, cols, total}` |
 | `GET /installed_apps` | the app list and their settings schema |
 | `POST /notify` | temporary interrupt; needs a bearer token from `notify_sources` |
+| `POST /module_audit` | compare module EEPROM against settings.json; writes nothing |
+
+### EEPROM drift
+
+Modules keep their offset, calibration and per-character tuning in EEPROM, and
+it drifts: a write interrupted by a brownout leaves a half-written cell, and
+the motors draw hardest exactly when a write lands. An unwritten cell reads as
+65535 — which is also this project's "no tuning stored" sentinel, since
+`w<index>:65535` is the erase command.
+
+A stored step is a position within one revolution, so anything at or beyond
+the module's calibration cannot be real. Values that fail that test are
+dropped on sync rather than written into settings.json, and a module reporting
+an unusable calibration keeps the one already stored — otherwise a bad reading
+would be written back to the module on the next restore.
+
+`POST /module_audit` reports the state of each module without changing
+anything:
+
+```bash
+curl -X POST http://splitflap.local/module_audit \
+  -H 'Content-Type: application/json' -d '{"ids": [0, 1, 2]}'
+```
+
+Each module comes back as `ok`, `diverged` (disagrees with settings.json),
+`suspect` (holds values that cannot be right), `unusable`, or `no_response`.
+Omit `ids` to audit the whole display.
 
 The same text form reaches the display over MQTT, if the Home Assistant
 integration is enabled:
