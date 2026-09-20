@@ -19,8 +19,7 @@ from splitflap.transport import (
 )
 from splitflap.display import send_to_display
 from splitflap.mqtt import mqtt_publish_discovery
-from tuning import (build_tuning_adjust_commands, effective_steps,
-                    step_sequence_problems)
+from tuning import build_tuning_adjust_commands, repair_step_sequence
 
 bp = Blueprint("tuning", __name__)
 
@@ -392,56 +391,55 @@ def apply_tuning():
             writes.append((mod_id, index, step))
 
     # A reel turns one way, so a module's positions have to climb round it in
-    # order; nothing mechanical moves a flap past its neighbour. Only problems
-    # this write introduces are refused, so a module whose stored sequence is
-    # already broken stays fixable.
+    # order; nothing mechanical moves a flap past its neighbour. A flap that
+    # breaks the order cannot be where it says it is, so it is given up rather
+    # than kept or argued with: without a tuned value it falls back to the
+    # plain division of the reel, which is where the module started.
     #
-    # Matched on the flap a descent starts at rather than on the whole entry:
-    # the steps either side of an already-broken seam change when a flap near
-    # it moves, and that is the same fault, not a new one.
+    # What is stored goes through this alongside what is being written, so a
+    # module already carrying an impossible position is put right by the next
+    # write that touches it instead of staying broken for good. Between two
+    # candidates the one being written loses, being the new arrival.
     by_module = {}
     for mod_id, index, step in writes:
         by_module.setdefault(mod_id, {})[str(index)] = step
+
+    to_hardware = get_position_source() != 'server'
+    written, reset = [], []
     for mod_id, pairs in by_module.items():
         key = str(mod_id)
         cal = int(settings['calibrations'].get(key, 4096))
         flap_count = get_module_flap_count(mod_id)
-        stored = settings['tuned_chars'].get(key, {})
-        before = {p["index"] for p in
-                  step_sequence_problems(effective_steps(stored, cal, flap_count), cal)}
-        after = step_sequence_problems(
-            effective_steps(dict(stored, **pairs), cal, flap_count), cal)
-        introduced = [p for p in after if p["index"] not in before]
-        if introduced:
-            # Disorder shows up as two descents at once and only one of them
-            # is the flap this write moved. Name that one; the route knows
-            # which flaps it was asked to write and the check does not.
-            written = {int(i) for i in pairs}
-            first = next((p for p in introduced
-                          if p["index"] in written or p["next"] in written),
-                         introduced[0])
-            return jsonify(
-                error=(f"Module {mod_id}: flap {first['index']} would sit at step "
-                       f"{first['step']} with flap {first['next']} at "
-                       f"{first['next_step']}. A reel turns one way, so a flap "
-                       f"cannot move past its neighbour — this is a misread rather "
-                       f"than a correction."),
-                module=mod_id, problems=introduced), 409
+        stored = {str(k): int(v) for k, v in settings['tuned_chars'].get(key, {}).items()}
+        repaired, dropped = repair_step_sequence(
+            dict(stored, **pairs), cal, flap_count, prefer=[int(i) for i in pairs])
 
-    # With the server holding the positions there is nothing to put on a
-    # module: the next page sends the step itself, and writing EEPROM as well
-    # would be wear for no benefit on the one store here that loses writes.
-    to_hardware = get_position_source() != 'server'
-    for mod_id, index, step in writes:
-        if to_hardware:
-            send_raw(f"m{mod_id:02d}w{index}:{step}")
-        settings['tuned_chars'].setdefault(str(mod_id), {})[str(index)] = step
+        for index in dropped:
+            reset.append({"module": mod_id, "index": index,
+                          "step": (index * cal) // flap_count,
+                          "proposed": pairs.get(str(index))})
+            # 65535 is how a module is told it has no tuning for a flap, the
+            # same value Custom Tune's erase writes. Only worth sending if the
+            # module is carrying something for it.
+            if to_hardware and str(index) in stored:
+                send_raw(f"m{mod_id:02d}w{index}:65535")
+
+        for index, step in repaired.items():
+            if stored.get(index) == step:
+                continue
+            if to_hardware:
+                send_raw(f"m{mod_id:02d}w{index}:{step}")
+            written.append((mod_id, int(index), step))
+
+        settings['tuned_chars'][key] = repaired
     save_settings(settings)
 
-    return jsonify(status="success", writes=len(writes),
-                   modules=len({m for m, _, _ in writes}),
+    return jsonify(status="success", writes=len(written),
+                   modules=len({m for m, _, _ in written}),
+                   reset=reset,
                    position_source=get_position_source(),
-                   hardware_updated=to_hardware and bool(state.ser) and bool(writes))
+                   hardware_updated=(to_hardware and bool(state.ser)
+                                     and bool(written or reset)))
 
 # ── Saved Playlists ──────────────────────────────────────────
 

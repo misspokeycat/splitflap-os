@@ -61,6 +61,7 @@ const cc = {
   features:    {},     // this position's modules, kept for re-scoring after a nudge
   positions:   {},     // what /tuning_status said each module was resting on
   fixes:       [],     // how each corrected position turned out
+  givenUp:     {},     // "module:flap" the server reset rather than accepted
   abort:       false,
   running:     false,
   drag:        null,   // index of the corner handle being dragged
@@ -304,6 +305,7 @@ function ccResetRun(){
   cc.unread  = {};
   cc.live    = {};
   cc.history = [];
+  cc.givenUp = {};
   cc.pass    = 0;
   cc.outcome = null;
   cc.abort   = false;
@@ -1235,6 +1237,7 @@ async function ccRunUntilClean(){
   cc.pass++;
   cc.templates = {};
   cc.fixes = [];
+  cc.givenUp = {};
   ccShow('sweep');
 
   for(let n = 0; n < cc.sweep.length; n++){
@@ -1336,6 +1339,9 @@ function ccCorrectionsAt(idx){
   for(let m = 0; m < cc.count; m++){
     const scored = (cc.results[m] || {})[idx];
     if(!scored || scored.err === 0) continue;
+    // Already reset once: nudging again from the plain division proposes the
+    // same impossible step and gets handed back the same way.
+    if(cc.givenUp[m + ':' + idx]) continue;
     tuned[String(m)] = { [String(idx)]: scored.to };
     moves.push({ module: m, step: scored.to });
   }
@@ -1395,7 +1401,8 @@ function ccStuckModules(idx){
     const scored = (cc.results[m] || {})[idx];
     if(scored && scored.err !== 0){
       out.push({ id: m, read: scored.read, err: scored.err,
-                 assumed: !!scored.assumed });
+                 assumed: !!scored.assumed,
+                 reset: !!cc.givenUp[m + ':' + idx] });
     }
   }
   return out;
@@ -1406,8 +1413,9 @@ async function ccFixPosition(idx, note){
   const char = getCharMap(0)[idx];
   let attempt = 0, refused = null;
 
-  for(; attempt < CC_FIX_TRIES && ccWrongAt(idx); attempt++){
+  for(; attempt < CC_FIX_TRIES; attempt++){
     const { tuned, moves } = ccCorrectionsAt(idx);
+    if(!moves.length) break;     // nothing left worth nudging at this flap
     const progress = 'Flap "' + char + '": nudging ' + moves.length +
                      ' module(s) by ' + ccStepSize() + ' steps, attempt ' +
                      (attempt + 1) + ' of ' + CC_FIX_TRIES;
@@ -1421,7 +1429,7 @@ async function ccFixPosition(idx, note){
       refused = write.data.error || 'write refused';
       break;
     }
-    ccNoteWritten(idx, tuned);
+    ccNoteWritten(idx, tuned, write.data.reset);
 
     note.textContent = 'Flap "' + char + '": checking…';
     await ccMoveTo(moves, idx);
@@ -1438,19 +1446,36 @@ async function ccFixPosition(idx, note){
 // `from`. Without this every nudge at a position measures from where the
 // module started rather than from where the last one left it, and computes
 // the same target again.
-function ccNoteWritten(idx, tuned){
+function ccNoteWritten(idx, tuned, reset){
   const at = cc.positions[idx] || (cc.positions[idx] = {});
+  const setPosition = (key, step) => {
+    const pos = at[key] || (at[key] = {});
+    pos.tuned = pos.active = step;
+  };
+  if(cc.settings && !cc.settings.tuned_chars) cc.settings.tuned_chars = {};
+
   for(const key of Object.keys(tuned)){
     const step = tuned[key][String(idx)];
     if(step === undefined) continue;
-    const pos = at[key] || (at[key] = {});
-    pos.tuned = pos.active = step;
+    setPosition(key, step);
+    if(cc.settings){
+      cc.settings.tuned_chars[key] =
+        Object.assign({}, cc.settings.tuned_chars[key] || {}, tuned[key]);
+    }
   }
-  if(!cc.settings) return;
-  if(!cc.settings.tuned_chars) cc.settings.tuned_chars = {};
-  for(const key of Object.keys(tuned)){
-    cc.settings.tuned_chars[key] =
-      Object.assign({}, cc.settings.tuned_chars[key] || {}, tuned[key]);
+
+  // A step the reel cannot put a flap on is handed back rather than stored,
+  // and the flap stands at the plain division instead. Follow the server:
+  // measuring the next nudge from a value it did not keep would chase a
+  // position that is not there.
+  for(const entry of reset || []){
+    if(entry.index !== idx) continue;
+    const key = String(entry.module);
+    setPosition(key, entry.step);
+    cc.givenUp[entry.module + ':' + idx] = true;
+    if(cc.settings && cc.settings.tuned_chars[key]){
+      delete cc.settings.tuned_chars[key][String(idx)];
+    }
   }
 }
 
@@ -1670,7 +1695,8 @@ function ccRenderStuck(){
   const line = f => {
     const who = f.modules.map(x =>
       x.id + (x.read ? ' showed "' + x.read + '"' : ' unreadable') +
-      (x.assumed ? ' (inferred)' : '')).join(', ');
+      (x.assumed ? ' (inferred)' : '') +
+      (x.reset ? ', reset to its untuned position' : '')).join(', ');
     const why = f.refused ? f.refused
               : 'still wrong after ' + f.attempts + ' nudge' + (f.attempts === 1 ? '' : 's');
     return '<li>Flap "' + f.char + '" (index ' + f.idx + ') — ' + why +

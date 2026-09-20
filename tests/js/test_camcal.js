@@ -29,7 +29,7 @@ const FLAPS = 64, CAL = 4096, NUDGE = 25;   // a flap is 64 steps; a nudge is no
 
 const cc = {
   count: 45, cols: 15, rows: 3,
-  results: {}, unread: {}, live: {},
+  results: {}, unread: {}, live: {}, givenUp: {},
   settings: { calibrations: {}, tuned_chars: {} },
 };
 
@@ -439,16 +439,23 @@ check('and nothing is inferred about it', weak[0].assumed, false);
 // computed from.
 
 const FIX_AT = 10;
-const sim = { trueStep: 570, at: 640, writes: [], posts: 0, refuse: false };
+const sim = { trueStep: 570, at: 640, writes: [], posts: 0, refuse: false,
+              // A step the reel cannot put the flap on is handed back rather
+              // than stored, and the flap stands at the plain division.
+              resetTo: null };
 
 async function ccPost(url, body) {
   if (url === '/apply_tuning') {
     sim.posts++;
     if (sim.refuse) return { ok: false, data: { error: 'flap 10 would sit 3 steps from flap 11' } };
+    if (sim.resetTo !== null) {
+      return { ok: true, data: { status: 'success', writes: 0,
+        reset: [{ module: 0, index: FIX_AT, step: sim.resetTo, proposed: null }] } };
+    }
     for (const m of Object.keys(body.tuned)) {
       for (const i of Object.keys(body.tuned[m])) sim.writes.push(body.tuned[m][i]);
     }
-    return { ok: true, data: { status: 'success' } };
+    return { ok: true, data: { status: 'success', writes: 1, reset: [] } };
   }
   if (url === '/custom_tune') { sim.at = body.step; return { ok: true, data: {} }; }
   return { ok: true, data: {} };
@@ -485,7 +492,8 @@ cc.count = 1;
 
 const startFix = () => {
   reset();
-  sim.at = 640; sim.writes = []; sim.posts = 0; sim.refuse = false;
+  sim.at = 640; sim.writes = []; sim.posts = 0; sim.refuse = false; sim.resetTo = null;
+  cc.givenUp = {};
   cc.positions = { [FIX_AT]: { '0': { active: 640, expected: 640, tuned: null } } };
   return ccRereadPosition(FIX_AT);
 };
@@ -533,6 +541,23 @@ const startFix = () => {
   check('and the module still showing the wrong thing', out.modules.length, 1);
   check('by id', out.modules[0].id, 0);
   check('with what it showed instead', out.modules[0].read, CHAR_MAP[FIX_AT + 1]);
+
+  // ── A flap handed back rather than stored ────────────────
+  //
+  // A step the reel cannot put a flap on is not written; the flap stands at
+  // the plain division instead. Following the value that was sent rather
+  // than the one that was kept would measure the next nudge from a position
+  // the display is not in — and nudging again from the plain division
+  // proposes the same impossible step and gets handed back the same way.
+  await startFix();
+  sim.resetTo = 640;
+  out = await loop.ccFixPosition(FIX_AT, note);
+  check('the position follows what the server kept, not what was sent',
+        cc.positions[FIX_AT]['0'].active, 640);
+  check('and the flap is not nudged again', sim.posts, 1);
+  check('and the run does not call it fixed', out.fixed, false);
+  check('and the report says it was reset', out.modules[0].reset, true);
+  check('and it did not burn the attempt budget', out.attempts, 1);
 
   console.log(failures ? `\n${failures} failure(s)` : '\nall checks passed');
   process.exit(failures ? 1 : 0);

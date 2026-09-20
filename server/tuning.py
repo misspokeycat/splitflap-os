@@ -97,3 +97,46 @@ def step_sequence_problems(steps, calibration):
                 "next_step": next_step,
             })
     return descents if len(descents) > 1 else []
+
+
+def repair_step_sequence(tuned, calibration, flap_count, prefer=()):
+    """Give up the tuned positions that cannot be where they claim to be.
+
+    There is nothing to preserve in a flap that is out of order: dropping its
+    tuned value falls the flap back to the plain division of the reel, which
+    is where the module started and is always in order.
+
+    Which flap in a broken sequence is the fault is not decidable from the
+    steps alone, so it is decided by trial. An untuned flap holds the plain
+    division and cannot be the odd one out, so the candidates are the tuned
+    ones, and the fault is whichever settles the sequence when dropped. Where
+    several would, `prefer` breaks the tie — a caller writing a flap is
+    saying that one is the new arrival. Where none does, they all go.
+
+    Returns the tuning that walks, and the flaps that had to be given up.
+    """
+    calibration = int(calibration)
+    flap_count = int(flap_count)
+    prefer = {int(i) for i in prefer}
+    repaired = {str(k): int(v) for k, v in (tuned or {}).items()}
+    reset = []
+
+    def walks(positions):
+        return not step_sequence_problems(
+            effective_steps(positions, calibration, flap_count), calibration)
+
+    while not walks(repaired):
+        problems = step_sequence_problems(
+            effective_steps(repaired, calibration, flap_count), calibration)
+        involved = {p["index"] for p in problems} | {p["next"] for p in problems}
+        candidates = sorted(i for i in involved if str(i) in repaired)
+        if not candidates:
+            break            # nothing tuned to give up; the reel itself disagrees
+        alone = [i for i in candidates
+                 if walks({k: v for k, v in repaired.items() if k != str(i)})]
+        drop = [next((i for i in alone if i in prefer), alone[0])] if alone else candidates
+        for index in drop:
+            repaired.pop(str(index))
+            reset.append(index)
+
+    return repaired, sorted(reset)

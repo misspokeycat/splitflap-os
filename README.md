@@ -155,11 +155,20 @@ have to climb round in order and come back to the start after one revolution,
 and nothing mechanical moves a flap past its neighbour. This is a check on
 order, not on spacing — a flap sitting an odd distance from its neighbour is
 what a half-finished correction looks like, and only a flap on the wrong side
-of one is impossible. A write that breaks the order comes back **409** naming
-the two flaps and where they would sit, and the run stops correcting that
-position; in practice it means the module needs its home offset moved rather
-than one position nudged. Only problems a write *introduces* are refused, so a
-module already carrying a bad sequence stays fixable.
+of one is impossible.
+
+A flap that fails it is reset to its expected position: the plain division of
+the reel into flaps, which is where the module started and is always in order.
+There is nothing to keep in a position the reel cannot put a flap in, and a
+known-good default is somewhere to re-tune from. The response lists what was
+reset, the run stops correcting that flap, and the review names it. What is
+already stored is checked the same way, so a module carrying an impossible
+position is put right by the next write that touches it rather than keeping it
+for good.
+
+A flap that needs this repeatedly usually wants its home offset moved rather
+than one position nudged — the review says so separately when a module reads
+wrong by the same amount everywhere.
 
 The review lists any flap that would not come right, with the modules still
 wrong and what each showed instead.
@@ -337,7 +346,7 @@ Other endpoints:
 | `GET /installed_apps` | the app list and their settings schema |
 | `POST /notify` | temporary interrupt; needs a bearer token from `notify_sources` |
 | `POST /module_audit` | compare module EEPROM against settings.json; writes nothing |
-| `POST /apply_tuning` | `{"tuned": {"3": {"10": 640}}}` — write just these tuned positions |
+| `POST /apply_tuning` | `{"tuned": {"3": {"10": 640}}}` — write just these tuned positions; replies with `reset` for any flap that would break the reel's order |
 | `POST /restore_settings` | push stored offsets, calibrations and tuning back onto the modules named in the payload |
 
 ### EEPROM drift
@@ -415,7 +424,9 @@ Tune uses: fifty-seven corrections is fifty-seven commands, about two seconds,
 and it does not grow with how much tuning the display already carries.
 Everything is validated before anything is written — a half-applied
 correction set is worse than a rejected one, because nothing records which
-half landed.
+half landed. A position that would put a flap on the wrong side of its
+neighbour is not written; that flap is reset to the plain division of the
+reel instead, and the response lists it under `reset`.
 
 `POST /module_audit` reports the state of each module without changing
 anything:

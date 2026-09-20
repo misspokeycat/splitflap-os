@@ -314,20 +314,39 @@ class ApplyTuningTests(SplitflapTestCase):
         self.assertEqual(body["writes"], 0)
         self.assertEqual(self.sent, [])
 
-    def test_a_flap_cannot_be_written_past_its_neighbour(self):
-        # Flap 11 sits at 704 on an untuned reel. Putting flap 10 beyond it
-        # describes a reel that turns both ways.
+    def test_a_flap_written_past_its_neighbour_falls_back_to_expected(self):
+        # Flap 11 sits at 704 on an untuned reel, so putting flap 10 beyond it
+        # describes a reel that turns both ways. The value is not written, and
+        # the flap is left where the plain division of the reel puts it.
         response = self.apply({"3": {"10": 705}})
-        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.status_code, 200)
         body = response.get_json()
-        self.assertEqual(body["module"], 3)
-        self.assertIn("cannot move past its neighbour", body["error"])
+        self.assertEqual(body["writes"], 0)
+        self.assertEqual(body["reset"],
+                         [{"module": 3, "index": 10, "step": 640, "proposed": 705}])
         self.assertEqual(self.sent, [])
         self.assertNotIn("10", settings['tuned_chars'].get('3', {}))
 
-    def test_a_whole_flap_of_error_is_refused(self):
+    def test_a_whole_flap_of_error_falls_back_to_expected(self):
         # What a misidentified flap produces, and what got written twice.
-        self.assertEqual(self.apply({"3": {"10": 640 + 64}}).status_code, 409)
+        body = self.apply({"3": {"10": 640 + 64}}).get_json()
+        self.assertEqual([r["index"] for r in body["reset"]], [10])
+        self.assertEqual(self.sent, [])
+
+    def test_a_position_already_impossible_is_given_up_when_anything_is_written(self):
+        # Nothing used to repair this: only what a write introduced was
+        # refused, so a module carrying a broken position kept it for good.
+        settings['tuned_chars']['3'] = {"10": 705, "30": 1920}
+        body = self.apply({"3": {"40": 2540}}).get_json()
+        self.assertEqual([r["index"] for r in body["reset"]], [10])
+        self.assertEqual(settings['tuned_chars']['3'], {"30": 1920, "40": 2540})
+        # The module is told it has no tuning for that flap, and the write
+        # that prompted it still lands.
+        self.assertEqual(self.sent, ["m03w10:65535", "m03w40:2540"])
+
+    def test_a_flap_left_at_expected_is_not_erased_on_a_module_that_never_had_it(self):
+        # Nothing to take back, so nothing goes on the bus.
+        self.apply({"3": {"10": 705}})
         self.assertEqual(self.sent, [])
 
     def test_compensating_for_real_slop_is_still_allowed(self):
@@ -346,9 +365,9 @@ class ApplyTuningTests(SplitflapTestCase):
         # Each of these is in order against what is stored — 700 sits under
         # flap 11 at 704, and 650 sits over flap 10 at 640 — and together
         # they put flap 10 past flap 11.
-        response = self.apply({"3": {"10": 700, "11": 650}})
-        self.assertEqual(response.status_code, 409)
-        self.assertEqual(self.sent, [])
+        body = self.apply({"3": {"10": 700, "11": 650}}).get_json()
+        self.assertEqual([r["index"] for r in body["reset"]], [10])
+        self.assertEqual(settings['tuned_chars']['3'], {"11": 650})
 
     def test_a_correction_against_uncorrected_neighbours_is_allowed(self):
         # The sweep corrects in ascending order, so flap 10 is written while
