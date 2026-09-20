@@ -81,7 +81,6 @@ def _prepare_text(text, raw=False):
     return clean_text.ljust(n)[:n]
 
 
-
 def module_step(mod_id, char):
     """Where settings.json says this module stops to show this character.
 
@@ -104,14 +103,9 @@ def module_step(mod_id, char):
 def module_frame(mod_id, char):
     """The bus frame that puts one module on one character.
 
-    There are two ways to say it. ``m05-A`` leaves the module to look up
-    where A is, which trusts the tuning in its EEPROM. ``m05g2816`` names the
-    motor step outright, which trusts settings.json instead and asks the
-    module only to go there.
-
-    Which one is used is a setting because the two stores are not equally
-    reliable — see get_position_source. Nothing else about the send changes:
-    same frame count, same order, same timing.
+    ``m05-A`` leaves the module to look up where A is, trusting its EEPROM.
+    ``m05g2816`` names the motor step outright, trusting settings.json and
+    asking the module only to go there. get_position_source chooses.
     """
     if get_position_source() == 'server':
         return f"m{mod_id:02d}g{module_step(mod_id, char)}"

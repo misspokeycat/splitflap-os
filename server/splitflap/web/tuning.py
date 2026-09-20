@@ -354,18 +354,12 @@ def restore_settings():
 
 @bp.route('/apply_tuning', methods=['POST'])
 def apply_tuning():
-    """Write only the tuned positions that changed.
+    """Write only the tuned positions that changed, one command each.
 
-    /restore_settings exists to make a module match our stored settings
-    exactly, so it erases that module's tuning and writes all of it back.
-    That is the right shape for restoring a backup and the wrong shape for
-    correcting a handful of positions: a fully tuned display is some
-    seventeen hundred commands, the better part of a minute of bus time, and
-    an EEPROM write for every position including the ones already correct.
-
-    This writes one command per correction. Fifty-seven corrections is
-    fifty-seven commands, and it does not grow with how much tuning the
-    display already carries.
+    Unlike /restore_settings, which erases a module's tuning and writes all
+    of it back to make the module match our settings exactly, the cost here
+    is the number of corrections rather than how much tuning the display
+    already carries.
     """
     data = request.json or {}
     tuned = data.get('tuned')
@@ -398,12 +392,9 @@ def apply_tuning():
             writes.append((mod_id, index, step))
 
     # A reel turns one way, so a module's positions have to climb round it in
-    # order. Nothing mechanical moves a flap past its neighbour — a position
-    # that breaks the order is a misread, and this is the last place to stop
-    # it before it is the display's idea of where that flap lives.
-    #
-    # Only problems this write introduces are refused. A module whose stored
-    # sequence is already broken has to stay fixable.
+    # order; nothing mechanical moves a flap past its neighbour. Only problems
+    # this write introduces are refused, so a module whose stored sequence is
+    # already broken stays fixable.
     by_module = {}
     for mod_id, index, step in writes:
         by_module.setdefault(mod_id, {})[str(index)] = step

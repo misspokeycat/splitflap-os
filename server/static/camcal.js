@@ -2,19 +2,13 @@
 //  CAMERA CALIBRATION
 // ============================================================
 // Point a camera at the display, step every module through the flap
-// positions, and read back what each one actually landed on. A module
-// showing the wrong character is off by a whole number of flaps, and a
-// flap is `calibration / flap_count` motor steps — so one photo yields an
-// exact correction for all 45 modules at once.
+// positions, and read back what each one landed on. Every module is
+// commanded to the same flap at once, so one photograph covers all 45.
 //
-// A sweep writes nothing. Corrections are staged in the browser, reviewed,
-// and then written in one batch — one command per correction, and none for
-// the positions that were already right. Per-nudge EEPROM writes land while
-// the motors are drawing hardest, which is how modules lose their tuning.
-//
-// Writing a correction is not evidence it worked, so a pass can be repeated:
-// re-reading the display after a write is the only thing that proves the
-// module moved where it was told.
+// A module on the wrong flap is somewhere past the boundary — the flap it
+// shows says which way to move, not how far — so it is nudged a fraction of
+// a flap, moved, and photographed again, at that position, before the sweep
+// goes on. Writing a correction is not evidence it worked; re-reading is.
 
 const CC_MOTION_MAX_W   = 480;   // frame width used for settle detection
 const CC_MOTION_W       = 12;    // per-cell crop for settle detection
@@ -80,14 +74,12 @@ const cc = {
 
 // ── Capture dump ───────────────────────────────────────────
 
-// Everything the run saw, kept so a misread can be looked at rather than
-// guessed at, and so a real capture can become a test fixture.
+// Everything the run saw, so a misread can be looked at rather than guessed
+// at, and a real capture can become a test fixture.
 //
 // Collected in the browser and handed over as one zip at the end. Nothing is
-// sent to the Pi: a sweep is a few thousand PNGs, and writing those to the SD
-// card the display boots from — while the motors are drawing, which is when
-// this hardware loses writes — is the thing the rest of this file is built to
-// avoid.
+// sent to the Pi: a sweep is a few thousand PNGs, and the card the display
+// boots from is already the storage most likely to drop a write.
 
 const CC_DUMP_MAX_BYTES = 120 * 1024 * 1024;
 
@@ -900,12 +892,10 @@ async function ccLearnNoiseFloor(){
   return cc.threshold;
 }
 
-// A reel turns one way, so going back a few steps means going almost all the
-// way round — seconds, not milliseconds. Waiting for stillness alone is not
-// enough: the four quiet frames that mean "settled" can all happen before the
-// module has started, and then the frame read is the one from before the
-// move. Forward nudges are short enough to hide this; backward ones are not,
-// which is why only they appeared to do nothing.
+// A reel turns one way, so a nudge backward is almost a full revolution —
+// seconds, not milliseconds. Stillness alone does not mean settled: the four
+// quiet frames can all fall before such a move has begun, and the frame then
+// read is the one from before it.
 async function ccWaitForMoveToStart(timeoutMs){
   const t0 = performance.now();
   let prev = null;
@@ -964,17 +954,15 @@ async function ccWaitForFrameQuiet(){
 // ── Matching against the display's own flaps ───────────────
 //
 // Reading the character is the wrong problem. This is closed-set
-// classification over the flaps a module has, with a known expected answer —
-// and the display can show us every one of them, so the reference images come
-// from the display itself rather than from a model of what letters look like.
+// classification over the flaps a module has, with a known expected answer,
+// and the display can show every one of them — so the references come from
+// the display itself rather than from a model of what letters look like.
 //
-// Every module is commanded to the same flap at once, and most of them land
-// on it, so the per-pixel median across modules at one position is that
-// flap's reference image. Matching against those beats OCR on the same
-// capture by a wide margin: 98% of cells classified against 71%, agreeing
-// with OCR on 99.2% of the ones OCR could read, and resolving 95% of the ones
-// it could not. P, B, R, I, O and 0 go from unreadable to confident, and the
-// flap seam stops mattering because it is in the template too.
+// Every module is commanded to the same flap at once and most land on it, so
+// the per-pixel median across modules at one position is that flap's
+// reference. It needs no model, no download and no internet, and it works on
+// flaps nothing could read: colour tiles, symbols, and the letters whose
+// printed seam is in the reference too.
 
 const CC_TPL_W    = 24;     // matching resolution; the glyphs are huge
 const CC_TPL_H    = 60;
@@ -987,16 +975,11 @@ const CC_TPL_ALIKE = 0.93;  // two references this similar cannot be told apart
 // the median is 0.525. At 0.70 this calls 0.3% of correct cells wrong and
 // spots 81% of the ones that are not where they were sent.
 const CC_ON_FLAP = 0.70;
-// And a floor under "it looks like some flap at all". Two cells of the same
-// display photographed at the same position share a window, a frame and a
-// background, so even the wrong flap correlates about 0.525. A cell that is
-// dark, blown out or has something in front of it correlates with nothing,
-// and it is that cell — not a module one flap ahead — that has to stay out
-// of the inference below, because the inference ends in a write.
-//
-// A guard rather than a tuned threshold: it is set well under the measured
-// off-flap median, and a capture with genuinely unreadable cells in it is
-// what would sharpen it.
+// And a floor under "it looks like some flap at all". Cells of this display
+// share a window, a frame and a background, so even the wrong flap correlates
+// about 0.525; one that is dark or obscured correlates with nothing. A guard
+// against the second, not a tuned threshold — a capture containing genuinely
+// unreadable cells is what would sharpen it.
 const CC_ANY_FLAP = 0.20;
 // One length for features and references alike. They are compared element by
 // element, so the two drifting apart reads off the end of the shorter one and
@@ -1004,24 +987,14 @@ const CC_ANY_FLAP = 0.20;
 const CC_TPL_PLANES = 3;    // brightness, and two colour differences
 const CC_TPL_LEN = CC_TPL_W * CC_TPL_H * CC_TPL_PLANES;
 
-// Downsample to a small patch, then zero-mean and unit-norm it so a dot
-// product between two of them is normalised cross-correlation — which is what
-// makes the comparison indifferent to exposure and overall brightness.
-// Shape from brightness, and the flap's colour alongside it.
+// Downsample to a small patch and unit-norm it, so a dot product between two
+// of them is normalised cross-correlation.
 //
-// Brightness alone cannot tell the colour tiles apart: they are solid
-// rectangles that differ only in hue, and subtracting the mean — which is
-// what makes the comparison indifferent to exposure — throws away the only
-// thing that distinguished them. Measured on a capture that swept all 63
-// flaps, orange and yellow correlated at 0.994 and every pair of tiles above
-// 0.94, so which one a module was showing was a coin toss.
-//
-// So the brightness plane is mean-subtracted as before, and two colour
-// difference planes are carried beside it un-subtracted, because for a solid
-// tile the mean is the signal. On the same capture that took identification
-// from 81.2% to 89.4% and the worst pair of tiles from 0.994 to 0.814. For a
-// letter, which is near-grey, the colour planes are close to zero and the
-// result is what it always was.
+// Three planes: brightness for shape, and two colour differences beside it.
+// Only brightness loses its mean — that is what makes the comparison
+// indifferent to exposure, but for a solid colour tile the mean *is* the
+// signal, and subtracting it leaves nothing to tell orange from yellow. A
+// letter is near-grey, so its colour planes sit near zero either way.
 function ccFeatures(cell){
   const w = cell.width, h = cell.height, px = cell.data;
   const n = CC_TPL_W * CC_TPL_H;
@@ -1059,9 +1032,8 @@ function ccFeatures(cell){
   return ccUnitNorm(f);
 }
 
-// Scale to unit length, without touching the mean — ccFeatures has already
-// taken the mean out of the plane it belongs in, and taking it out again
-// across all three would undo the colour planes it deliberately kept.
+// Scale to unit length without touching the mean; see ccFeatures for why the
+// colour planes have to keep theirs.
 function ccUnitNorm(f){
   let ss = 0;
   for(let i = 0; i < f.length; i++) ss += f[i] * f[i];
@@ -1252,9 +1224,8 @@ async function ccBegin(){
 }
 
 
-// Measure, write, measure again — repeating while it is still improving.
-// Auto mode does the whole thing; otherwise it stops after the first pass and
-// waits to be told.
+// One walk of the sweep. With auto-correct on, each position is corrected
+// and proved before the next; with it off, nothing is written.
 async function ccRunUntilClean(){
   const correct = document.getElementById('ccAuto').checked;
   const bar   = document.getElementById('ccSweepBar');
@@ -1463,15 +1434,10 @@ async function ccFixPosition(idx, note){
            left: left, refused: refused, modules: ccStuckModules(idx) };
 }
 
-// Keep our copy of the display's positions in step with what was just
-// written, so the next look at this flap measures from where the module now
-// is rather than from where it started.
-//
-// This is what made a second nudge possible. `from` in ccScoreReads comes
-// from cc.positions, which was read once before the first correction and
-// never updated — so every attempt recomputed the same target from the same
-// stale origin, wrote the identical step six times, and reported the flap
-// stuck. Anything needing more than one nudge could never come right.
+// Carry a written step into cc.positions, which is where ccScoreReads takes
+// `from`. Without this every nudge at a position measures from where the
+// module started rather than from where the last one left it, and computes
+// the same target again.
 function ccNoteWritten(idx, tuned){
   const at = cc.positions[idx] || (cc.positions[idx] = {});
   for(const key of Object.keys(tuned)){
@@ -1488,12 +1454,9 @@ function ccNoteWritten(idx, tuned){
   }
 }
 
-// One position's crops, each named for the pass, position and module that
-// produced it, alongside what was expected of it and what was made of it.
-// The frames go down as they are taken; what was made of them cannot, because
-// nothing has been made of them yet. Matching needs the whole pass before it
-// has anything to compare against, so the readings are filled in afterwards
-// by ccDumpReadings. Recording them here wrote a manifest of nulls.
+// One position's crops, named for the pass, position and module. The
+// readings are filled in by ccDumpReadings once the position has been scored
+// and corrected; recording them here would write a manifest of nulls.
 function ccDumpFrames(idx, cells){
   if(!cc.dump) return;
   const kept = [];
@@ -1554,9 +1517,8 @@ function ccScoreReads(idx, reads, positions){
       : (r.index !== undefined ? r.index : (r.char ? map.indexOf(r.char) : -1));
 
     // The confidence filter is about how good a match is. An inferred flap
-    // is not a match and has no confidence to offer, so it is judged by the
-    // conditions ccReadsFrom drew it under rather than by a number — which
-    // is why it no longer claims one.
+    // is not a match: ccReadsFrom has already ruled out the alternatives,
+    // and there is no number for it to clear here.
     if(readIdx < 0 || !r || (!r.assumed && r.conf < minConf)){
       cc.unread[m] = (cc.unread[m] || 0) + 1;
       cc.live[m] = { char: r && r.char ? r.char : '?' };
@@ -1581,26 +1543,17 @@ function ccScoreReads(idx, reads, positions){
     const from = (pos.active !== undefined && pos.active !== null)
       ? parseInt(pos.active) : Math.floor(idx * cal / flaps);
 
-    // The letter says which way, not how far. A module showing the wrong
-    // flap is somewhere past the boundary — it might be five steps over, it
-    // might be forty — so moving it a whole flap overshoots almost every
-    // time, and lands it a whole flap out the other way.
-    //
-    // So: nudge, look again, nudge again. That is what Auto Fine-Tune does
-    // by hand at 25 steps a click, and it is the only part of this that ever
-    // worked on this display. Reading the character ahead means the module
+    // The flap says which way, not how far, so this is one nudge of a
+    // settable size rather than a computed jump — repeated and looked at
+    // again by ccFixPosition. Showing the flap ahead means the module
     // overshot, so it goes back.
-    // Wrapped, not clamped. Step 0 and step cal-1 are neighbours on a reel,
-    // so clamping at zero quietly turned every backward nudge near the start
-    // of the drum into no move at all — and only backward ones, because
-    // forward never reaches that edge.
+    //
+    // Wrapped, not clamped: step 0 and step cal-1 are neighbours on a reel.
     const to = ccWrapStep(Math.round(from - Math.sign(err) * ccStepSize()), cal);
 
     if(!cc.results[m]) cc.results[m] = {};
     cc.results[m][idx] = { read: r.char, matched: readIdx, conf: Math.round(r.conf),
                            err: err, from: from, to: to,
-                           // whether the flap was recognised or inferred from
-                           // matching nothing already seen
                            assumed: !!r.assumed,
                            own: r.own === undefined ? null : Math.round(r.own * 1000) / 1000 };
     cc.live[m] = { char: r.char, err: err };
@@ -1813,10 +1766,9 @@ async function ccWriteCorrections(){
   return await ccConfirmWrites(Object.keys(changed).map(Number));
 }
 
-// Storage on this hardware drops writes quietly. Read the modules back and
-// say whether they actually kept what we just sent.
-// Read the modules back and report which ones do not hold what we just
-// sent. Returns the offending ids, or null if the audit could not be run.
+// Storage on this hardware drops writes quietly, so read the modules back.
+// Returns the ids that do not hold what was sent, or null if the audit could
+// not be run at all.
 async function ccAudit(ids){
   const audit = document.getElementById('ccAudit');
   audit.style.display = 'block';

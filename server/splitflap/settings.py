@@ -93,31 +93,23 @@ def _valid_port(value, source):
     return port
 
 
-# Who decides where a flap has to stop.
+# Who decides where a flap has to stop. "module" tells the display a
+# character and lets each module look the motor step up in its own EEPROM;
+# "server" sends the step from settings.json instead.
 #
-# "module" is how this has always worked: the display is told a character and
-# each module looks up the motor step in its own EEPROM. "server" sends the
-# step instead, taken from settings.json, and the module is asked only to go
-# there.
-#
-# It matters because the two stores are not equally reliable. Module EEPROM is
-# written while the motors are drawing and this display has lost tuning to
-# that more than once; settings.json is written atomically, keeps a backup,
-# and is one file rather than forty-five chips.
+# The two stores are not equally reliable: module EEPROM is written while the
+# motors are drawing and this display has lost tuning to that more than once,
+# while settings.json is written atomically, keeps a backup, and is one file
+# rather than forty-five chips.
 DEFAULT_POSITION_SOURCE = 'module'
 
 
 def get_position_source(data=None):
     """Resolve where flap positions come from: env var > settings.json > module.
 
-    Anything unrecognised means the module, because that is the behaviour
-    that does not depend on this setting being understood.
-
-    Unlike the bind address, this is asked on the way to the modules — once
-    per module per page — so it reads the settings already in memory rather
-    than the file. Going to disk here would be a parse of settings.json for
-    every character sent, and would ignore a change made in the UI until the
-    next restart.
+    Anything unrecognised means the module, the behaviour that does not
+    depend on this setting being understood. Reads the settings already in
+    memory, not the file: this is asked once per module per page.
     """
     value = os.environ.get("SPLITFLAP_POSITION_SOURCE")
     if not (isinstance(value, str) and value.strip()):
