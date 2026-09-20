@@ -111,6 +111,13 @@ function ccDumpStart(){
   };
 }
 
+function ccCellToCanvas(cell){
+  const c = document.createElement('canvas');
+  c.width = cell.width; c.height = cell.height;
+  c.getContext('2d').putImageData(cell, 0, 0);
+  return c;
+}
+
 function ccPngOf(imageData){
   const b64 = ccCellToCanvas(imageData).toDataURL('image/png').split(',')[1];
   const bin = atob(b64);
@@ -852,7 +859,6 @@ function ccGrayOf(img){
   return g;
 }
 
-const ccGray = ccGrayOf;
 
 function ccMad(a, b){
   let sum = 0;
@@ -870,7 +876,7 @@ const ccSleep = ms => new Promise(r => setTimeout(r, ms));
 async function ccLearnNoiseFloor(){
   let prev = null, worst = 0;
   for(let f = 0; f < CC_NOISE_FRAMES; f++){
-    const cur = ccGrabCells(CC_MOTION_W, CC_MOTION_H, CC_MOTION_MAX_W).map(ccGray);
+    const cur = ccGrabCells(CC_MOTION_W, CC_MOTION_H, CC_MOTION_MAX_W).map(ccGrayOf);
     if(prev){
       for(let i = 0; i < cur.length; i++) worst = Math.max(worst, ccMad(prev[i], cur[i]));
     }
@@ -886,7 +892,7 @@ async function ccWaitForSettle(onTick){
   let prev = null, stable = 0, moving = [];
   while(performance.now() - t0 < CC_SETTLE_TIMEOUT){
     if(cc.abort) return { settled: false, moving: [], aborted: true };
-    const cur = ccGrabCells(CC_MOTION_W, CC_MOTION_H, CC_MOTION_MAX_W).map(ccGray);
+    const cur = ccGrabCells(CC_MOTION_W, CC_MOTION_H, CC_MOTION_MAX_W).map(ccGrayOf);
     if(prev){
       moving = [];
       for(let i = 0; i < cur.length; i++){
