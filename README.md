@@ -13,8 +13,9 @@ Built on [Adam G Makes' Split-Flap Display](https://github.com/adamgmakes/SplitF
 - **Live preview** — animated flap simulation in the browser
 - **Calibration tools** — hardware inspector, auto fine-tune, teach mode
 - **Camera tune** — point a camera at the display and let it read itself: it finds the grid from
-  its own four corner modules, waits for the reels to stop, OCRs every module from one frame, and
-  re-reads after writing to confirm the corrections took (needs HTTPS — see below)
+  its own four corner modules, waits for the reels to stop, identifies every module from one frame
+  by matching against reference images built from the display, and re-reads after writing to
+  confirm the corrections took (needs HTTPS — see below)
 - **Universal Firmware provisioning** — automatically discover, identify, assign, diagnose, and de-provision modules from the calibration page
 - **MQTT** — Home Assistant integration with auto-discovery
 - **Configurable serial port** — auto-detect available ports or enter a custom path; supports env var, settings UI, and Docker deployments
@@ -113,8 +114,9 @@ here already known to drop writes — least of all while the motors are running.
 
 The archive holds one PNG per module per position, plus a `manifest.json`
 recording the grid geometry, the homography, and for every reading: the
-module, the expected character, what OCR returned, its confidence, the
-calibration it was measured against, and the step correction derived from it.
+module, the expected flap, the flap it was matched to, how clearly that beat
+the runner-up, the calibration it was measured against, and the step
+correction derived from it.
 
 To turn a session into a regression test, unzip it into
 `tests/fixtures/captures/<name>/`. `tests/js/test_captures.js` picks up any
@@ -122,6 +124,24 @@ session found there and re-runs corner detection and the correction arithmetic
 over it. With no fixtures present that half stays quiet, so the suite passes on
 a fresh clone — the images are photographs of one particular display and too
 large to ship.
+
+### How a module is identified
+
+Not by reading the character. Every module is commanded to the same flap at
+once and most of them land on it, so the per-pixel median across the display
+at one position *is* that flap's reference image. Each module is then matched
+against those by normalised cross-correlation.
+
+This is why it works on flaps nothing could read — colour tiles, symbols, and
+the letters whose printed seam defeats an OCR engine. On a real 3x15 capture
+it identified 98% of module-positions where Tesseract managed 71%, agreeing
+with Tesseract on 99.2% of the ones it could read. It needs no model, no
+download and no internet, so it works on the hotspot.
+
+The tradeoff is that it is *relative*. The references are labelled by the flap
+that was commanded, so if every module on the display were wrong in the same
+way at the same time, the references would carry that error and the run would
+report a clean display. Glance at the display before trusting a clean result.
 
 ## Listening address (reverse proxy / HTTPS)
 

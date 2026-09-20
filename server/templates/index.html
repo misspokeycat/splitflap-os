@@ -760,7 +760,8 @@
       <h3 style="color:#3ec8b5;margin-bottom:12px">📷 Camera Tune</h3>
       <p style="color:#aaa;font-size:.9rem;line-height:1.6">
         Point a camera at the display. Every module is stepped through the same flap positions,
-        photographed once they stop moving, and read with OCR. A module showing the wrong character
+        photographed once they stop moving, and matched against reference images built from the
+        display itself — no character recognition, and nothing downloaded. A module on the wrong flap
         is off by a whole number of flaps, which converts straight to a step correction.
       </p>
       <p style="color:#aaa;font-size:.85rem;line-height:1.6">
@@ -773,14 +774,16 @@
           <option value="alpha" selected>Letters (A–Z) — 26 positions</option>
           <option value="digit">Digits (0–9) — 10 positions</option>
           <option value="both">Letters and digits — 36 positions</option>
+          <option value="all">Every flap — 63 positions, including the colour tiles</option>
         </select>
         <div style="color:#666;font-size:.75rem;margin-top:4px">
-          Blanks, symbols and the colour tiles are skipped — they either do not OCR or are easy to confuse.
+          Every flap is matched against a reference built from the display itself, so colour tiles and
+          symbols work as well as letters. More positions means a longer run, not a better one.
         </div>
       </div>
       <div style="display:flex;gap:10px;margin:14px 0">
         <div style="flex:1">
-          <label class="field-label">Min OCR confidence</label>
+          <label class="field-label">Min match confidence</label>
           <input type="number" id="ccMinConf" value="60" min="0" max="100">
         </div>
         <div style="flex:1">
@@ -789,8 +792,8 @@
         </div>
       </div>
       <div style="color:#666;font-size:.75rem;margin-bottom:14px">
-        Reads below the confidence floor, or implying an error larger than the flap limit, are
-        discarded as misreads rather than written.
+        A match is confident when it beats the runner-up clearly. Anything below the floor, or
+        implying an error larger than the flap limit, is discarded rather than written.
       </div>
       <label class="cc-check">
         <input type="checkbox" id="ccAuto" checked>

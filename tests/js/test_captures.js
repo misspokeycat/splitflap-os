@@ -5,11 +5,10 @@
 // untested branches — and a canvas picks its filter per scanline, so a real
 // capture will hit all of them.
 //
-// The second half runs the tuner's own detection over real captures, if any
-// have been dropped into tests/fixtures/captures/. There are none in the
-// repo: they are photographs of one person's display, too big and too
-// specific to ship. Dump a session from the calibration page, unzip it there,
-// and this starts checking the pipeline against what the camera actually saw.
+// The rest runs corner detection and flap matching over real captures from
+// tests/fixtures/captures/. One is committed — a 3x15 display photographed
+// handheld — and any session dumped from the calibration page and unzipped
+// there is picked up as well.
 const fs = require('fs');
 const path = require('path');
 const { decodePng, encodePng, toGray } = require(path.join(__dirname, 'png.js'));
@@ -30,16 +29,28 @@ const grab = name => {
 
 const cc = { count: 45, cols: 15, rows: 3 };
 const api = new Function(
-  'cc', 'CC_CELL_INSET',
+  'cc',
   ['ccSolveH', 'ccGauss', 'ccApplyH', 'ccScaleH', 'ccCellQuad', 'ccOtsu', 'ccFindBlobs',
-   'ccCornerModules', 'ccCornerCentres', 'ccSeamRows', 'ccCellAspect'].map(grab).join('\n') +
-  // Taken from the source rather than copied here, so retuning the seam
-  // detector is tested at its new values instead of silently drifting away
-  // from what this file asserts.
-  '\n' + (src.match(/^const CC_(?:SEAM|OCR)_[A-Z]+\s*=\s*[0-9.]+;/gm) || []).join('\n') +
+   'ccCornerModules', 'ccCornerCentres', 'ccCellAspect', 'ccGrayOf',
+   'ccFeatures', 'ccNormalise', 'ccCorrelate', 'ccBuildTemplates', 'ccMatch'].map(grab).join('\n') +
+  // Taken from the source rather than copied here, so retuning the matcher is
+  // tested at its new values instead of silently drifting away from what this
+  // file asserts.
+  '\n' + (src.match(/^const CC_(?:TPL|CELL)_[A-Z_]+\s*=\s*[0-9.]+;/gm) || []).join('\n') +
   '; return {ccSolveH, ccApplyH, ccScaleH, ccCellQuad, ccOtsu, ccFindBlobs,' +
-  ' ccCornerModules, ccCornerCentres, ccSeamRows, ccCellAspect};'
-)(cc, 0.14);
+  ' ccCornerModules, ccCornerCentres, ccCellAspect, ccGrayOf,' +
+  ' ccFeatures, ccNormalise, ccCorrelate, ccBuildTemplates, ccMatch};'
+)(cc);
+
+// ccFeatures takes what a canvas hands it, so wrap grey pixels back up as one.
+function asImageData(grey, w, h) {
+  const data = new Uint8ClampedArray(w * h * 4);
+  for (let i = 0; i < grey.length; i++) {
+    data[i*4] = data[i*4+1] = data[i*4+2] = grey[i];
+    data[i*4+3] = 255;
+  }
+  return { data, width: w, height: h };
+}
 
 let failures = 0;
 const check = (label, got, want) => {
@@ -203,74 +214,102 @@ if (!sessions.length) {
   }
 }
 
-// ── Finding the flap seam ──────────────────────────────────
+// ── Matching, on its own terms ─────────────────────────────
 
-// A character is printed across two half-cards and the join shows as a line
-// all the way across the glyph. To OCR that is a stroke the letter does not
-// have, which is why P, R, Q and 9 came back unread from a real sweep while
-// S and X read perfectly.
-function synthetic(w, h, opts) {
-  const g = new Uint8Array(w * h);
-  // A bar down the middle, so there is something bright to bound the glyph.
-  for (let y = Math.round(h * 0.2); y < Math.round(h * 0.8); y++)
-    for (let x = Math.round(w * 0.3); x < Math.round(w * 0.45); x++) g[y * w + x] = 230;
-  if (opts && opts.seam) {
-    for (let y = opts.seam[0]; y <= opts.seam[1]; y++)
-      for (let x = Math.round(w * 0.3); x < Math.round(w * 0.9); x++) g[y * w + x] = 210;
-  }
-  return g;
-}
+// Correlation after normalising is indifferent to exposure: the same flap
+// photographed brighter is still the same flap, which is the whole reason the
+// comparison is done this way rather than on raw pixels.
+const shape = new Uint8Array(24 * 60);
+for (let y = 10; y < 40; y++) for (let x = 4; x < 18; x++) shape[y * 24 + x] = 200;
+const dim = shape.map(v => Math.round(v * 0.45 + 20));
+const fA = api.ccFeatures(asImageData(shape, 24, 60));
+const fB = api.ccFeatures(asImageData(dim, 24, 60));
+near('the same shape at a different exposure still matches', api.ccCorrelate(fA, fB), 1, 1e-6);
 
-const SW = 96, SH = 240;
-const withSeam = api.ccSeamRows(synthetic(SW, SH, { seam: [116, 126] }), SW, SH);
-check('a seam across the glyph is found', !!withSeam, true);
-if (withSeam) {
-  check('seam top', withSeam.top, 116);
-  check('seam bottom', withSeam.bot, 126);
-}
-check('a glyph with no bar across it has no seam',
-      api.ccSeamRows(synthetic(SW, SH, null), SW, SH), null);
-check('a blank cell has no seam',
-      api.ccSeamRows(new Uint8Array(SW * SH), SW, SH), null);
+const other = new Uint8Array(24 * 60);
+for (let y = 10; y < 40; y++) for (let x = 4; x < 18; x++) if ((x + y) % 3) other[y * 24 + x] = 200;
+const fC = api.ccFeatures(asImageData(other, 24, 60));
+check('a different shape does not', api.ccCorrelate(fA, fC) < 0.95, true);
 
-// Only near the middle: a letter's own crossbar elsewhere is not a seam.
-check('a bar away from the middle is left alone',
-      api.ccSeamRows(synthetic(SW, SH, { seam: [56, 62] }), SW, SH), null);
+// A minority on the wrong flap must not drag the reference image with them.
+const stack = {};
+for (let m = 0; m < 12; m++) stack[m] = m < 9 ? api.ccFeatures(asImageData(shape, 24, 60))
+                                              : api.ccFeatures(asImageData(other, 24, 60));
+const built = api.ccBuildTemplates({ 7: stack });
+near('the reference image follows the majority', api.ccCorrelate(built[7], fA), 1, 0.02);
+check('too few samples to outvote anything builds nothing',
+      Object.keys(api.ccBuildTemplates({ 7: { 0: fA, 1: fB } })).length, 0);
 
-// ── The real capture ───────────────────────────────────────
+// ── Matching, on the real capture ──────────────────────────
 
 if (sessions.length) {
   const dir = path.join(FIXTURES, sessions[0]);
   const manifest = JSON.parse(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8'));
-  cc.rows = manifest.grid.rows; cc.cols = manifest.grid.cols; cc.count = manifest.grid.count;
-  console.log(`\n  session ${sessions[0]}, camera path:`);
+  const st = manifest.strips;
+  if (st) {
+    cc.rows = manifest.grid.rows; cc.cols = manifest.grid.cols; cc.count = manifest.grid.count;
+    console.log(`\n  session ${sessions[0]}, matching ${st.indices.length} positions:`);
 
-  // The crop that came back empty from OCR has a seam straight through it.
-  const empty = path.join(dir, 'p1_i16_m00.png');       // expected "P", read nothing
-  if (fs.existsSync(empty)) {
-    const img = decodePng(fs.readFileSync(empty));
-    const seam = api.ccSeamRows(toGray(img), img.width, img.height);
-    check('    the unread P has a seam across it', !!seam, true);
-    if (seam) {
-      const mid = img.height / 2;
-      check('    and it sits near the middle of the card',
-            Math.abs((seam.top + seam.bot) / 2 - mid) < img.height * 0.18, true);
+    // Unpack the strips into one feature vector per module per position.
+    const samples = {};
+    for (const idx of st.indices) {
+      const img = decodePng(fs.readFileSync(path.join(dir, `strip_i${String(idx).padStart(2,'0')}.png`)));
+      const g = toGray(img);
+      samples[idx] = {};
+      for (let m = 0; m < st.modules; m++) {
+        const cell = new Uint8Array(st.cellW * st.cellH);
+        for (let y = 0; y < st.cellH; y++)
+          for (let x = 0; x < st.cellW; x++) cell[y*st.cellW+x] = g[y*img.width + m*st.cellW + x];
+        samples[idx][m] = api.ccFeatures(asImageData(cell, st.cellW, st.cellH));
+      }
     }
-  }
 
-  // A module window is much taller than it is wide. This capture was taken
-  // with a fixed 96x144 crop, so it is the evidence for the fix: the helper
-  // must derive a far taller buffer from the same grid.
-  cc.H = manifest.homography;
-  cc.corners = [[0,0],[1,0],[1,1],[0,1]].map(([u,v]) => api.ccApplyH(cc.H, u, v));
-  const aspect = api.ccCellAspect();
-  near('    module window aspect read from the grid', aspect, 2.52, 0.05);
-  const derived = Math.max(96, Math.min(400, Math.round(96 * aspect)));
-  check('    the derived crop is taller than the one this run used',
-        derived > manifest.cell.h, true);
-  console.log(`    (this capture used ${manifest.cell.w}x${manifest.cell.h}; ` +
-              `the grid says ${manifest.cell.w}x${derived})`);
-  cc.H = null;
+    // Templates from one half of the modules, tested on the other, so a
+    // module is never matched against a reference it helped build.
+    const halves = [[0, 1], [1, 0]];
+    let agree = 0, disagree = 0, scored = 0, resolved = 0, blind = 0, uncheckable = 0;
+    const byIdx = new Map(manifest.positions.map(p => [p.index, p]));
+    // Only a handful of positions are shipped, so a module that was one flap
+    // out is often sitting on a flap this fixture has no reference for. The
+    // matcher cannot name a flap it was never shown; those are skipped rather
+    // than counted against it.
+    const shipped = new Set(st.indices);
+
+    for (const [build, test] of halves) {
+      const group = {};
+      for (const idx of st.indices) {
+        group[idx] = {};
+        for (let m = 0; m < st.modules; m++) if (m % 2 === build) group[idx][m] = samples[idx][m];
+      }
+      const templates = api.ccBuildTemplates(group);
+      for (const idx of st.indices) {
+        const recorded = new Map((byIdx.get(idx).modules || []).map(x => [x.id, x]));
+        for (let m = 0; m < st.modules; m++) {
+          if (m % 2 !== test) continue;
+          const hit = api.ccMatch(samples[idx][m], templates);
+          if (!hit) continue;
+          const rec = recorded.get(m);
+          if (rec && rec.err !== undefined) {
+            if (!shipped.has(idx + rec.err)) { uncheckable++; continue; }
+            scored++;
+            if (hit.index === idx + rec.err) agree++; else disagree++;
+          } else {
+            blind++;
+            if (hit.conf >= 60) resolved++;
+          }
+        }
+      }
+    }
+
+    const pc = (a, b) => b ? (100 * a / b).toFixed(1) + '%' : 'n/a';
+    console.log(`    where the run got a reading: ${scored} cells, matcher agrees ${pc(agree, scored)}` +
+                (uncheckable ? `  (${uncheckable} skipped: flap not in this fixture)` : ''));
+    console.log(`    where it got nothing:        ${blind} cells, matcher resolves ${pc(resolved, blind)}`);
+    check('    the matcher agrees with the run it can be checked against',
+          scored > 0 && agree / scored > 0.98, true);
+    check('    and answers most of what the run could not read',
+          blind === 0 || resolved / blind > 0.85, true);
+  }
 }
 
 console.log(failures ? `\n${failures} failure(s)` : '\nall checks passed');
