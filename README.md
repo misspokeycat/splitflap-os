@@ -55,9 +55,14 @@ Configure WiFi from Settings > WiFi / Network in the UI.
 
 ```bash
 cd ~/splitflap-os
-git pull origin main
+git pull
 sudo bash setup/install.sh
 ```
+
+Updates follow the branch the checkout is on and the remote that branch
+tracks — the **Update Now** button in Settings does the same, and says which
+branch it is following. On a detached HEAD it reports that rather than
+guessing a branch and pulling someone else's work over yours.
 
 ## Hardware
 
@@ -139,6 +144,7 @@ splitflap/
   mqtt.py                 — Home Assistant integration
   startup.py              — boot tasks (auto-home, broker connect, module watch)
   tasks.py                — background loop registration
+  updates.py              — the branch and remote in-place updates come from
   web/                    — HTTP routes, one blueprint per area of the UI
 hardware/                 — Universal Firmware provisioning
 gateway_transport.py      — pyserial-compatible facade over an MQTT gateway

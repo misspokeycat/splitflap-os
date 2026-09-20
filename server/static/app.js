@@ -4347,12 +4347,22 @@ function checkForUpdate(force=false){
     if(badge) badge.textContent = `v${data.current}`;
 
     if(!statusEl) return;
+    // Which branch this Pi actually follows. Updates come from wherever the
+    // checkout points, so on anything but the usual branch it has to say so.
+    const tracking = data.tracking ? ` (${data.tracking})` : '';
+
     if(data.error){
-      statusEl.textContent = `v${data.current} — update check failed`;
+      statusEl.textContent = `v${data.current} — ${data.error}`;
       return;
     }
     if(data.has_update){
-      statusEl.innerHTML = `<strong style="color:var(--green)">Update available: v${data.latest}</strong>${data.release_name ? ` — ${data.release_name}` : ''}`;
+      const behind = data.commits_behind > 0
+        ? `${data.commits_behind} commit${data.commits_behind===1?'':'s'} behind ${data.tracking}`
+        : '';
+      const headline = data.latest && data.latest !== data.current
+        ? `Update available: v${data.latest}` : 'Update available';
+      const detail = [behind, data.release_name].filter(Boolean).join(' — ');
+      statusEl.innerHTML = `<strong style="color:var(--green)">${headline}</strong>${detail ? ` — ${detail}` : ''}`;
       if(actionsEl){ actionsEl.style.display='flex'; }
       if(releaseLink && data.release_url) releaseLink.href = data.release_url;
       if(badge){
@@ -4362,7 +4372,7 @@ function checkForUpdate(force=false){
       }
       if(typeof lucide!=='undefined') lucide.createIcons();
     } else {
-      statusEl.textContent = `v${data.current} — up to date`;
+      statusEl.textContent = `v${data.current} — up to date${tracking}`;
       if(actionsEl) actionsEl.style.display='none';
     }
   }).catch(()=>{

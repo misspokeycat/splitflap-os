@@ -12,7 +12,7 @@ from unittest import mock
 from support import SplitflapTestCase, app, state
 
 from splitflap.grid import get_module_count
-from splitflap.settings import settings
+from splitflap.settings import read_version, settings
 
 
 # Frozen inventory of the HTTP surface: (rule, endpoint, methods).
@@ -278,7 +278,12 @@ class WriteRouteSmokeTests(RouteSmokeTestCase):
 class UpdateCheckTests(RouteSmokeTestCase):
     """/check_update caches its answer for an hour and returns the cached
     value without a try block, so a result that cannot be serialised poisons
-    the route rather than failing once."""
+    the route rather than failing once.
+
+    What counts as an update is git's answer, not the release feed's: releases
+    are cut from one branch and say nothing about whichever branch a given Pi
+    is actually following.
+    """
 
     def setUp(self):
         super().setUp()
@@ -286,6 +291,28 @@ class UpdateCheckTests(RouteSmokeTestCase):
         self._cache = _update_cache
         _update_cache.update(checked_at=0, result=None)
         self.addCleanup(_update_cache.update, checked_at=0, result=None)
+        self.on_branch("main", behind=2)
+
+    def on_branch(self, branch, behind=0, reachable=True):
+        """Put the checkout on a branch, so the route has one to report."""
+        from splitflap import updates
+        answers = {
+            "rev-parse --abbrev-ref HEAD": branch,
+            "config --get branch.{}.remote".format(branch): "origin",
+            "config --get branch.{}.merge".format(branch): "refs/heads/" + branch,
+            "remote get-url origin": "https://github.com/csader/splitflap-os.git",
+            "rev-list --count HEAD..FETCH_HEAD": str(behind),
+        }
+
+        def git(*args, **kwargs):
+            key = " ".join(str(a) for a in args)
+            if not reachable and key.startswith("fetch"):
+                return False, "could not resolve host"
+            return True, answers.get(key, "")
+
+        patch = mock.patch.object(updates, "git", git)
+        patch.start()
+        self.addCleanup(patch.stop)
 
     def test_an_unserialisable_upstream_payload_does_not_poison_the_cache(self):
         # The mocked requests.get returns a MagicMock, so every field read out
@@ -305,9 +332,45 @@ class UpdateCheckTests(RouteSmokeTestCase):
             self.assertEqual(self.http.get("/check_update").get_json(), first)
 
     def test_has_update_is_a_boolean_even_when_upstream_is_empty(self):
+        self.on_branch("main", behind=0)
         with mock.patch("requests.get", return_value=_fake_response({"tag_name": None})):
             body = self.http.get("/check_update").get_json()
         self.assertIs(body["has_update"], False)
+
+    def test_it_reports_the_branch_this_checkout_actually_follows(self):
+        self.on_branch("refactor/modularize-server", behind=3)
+        body = self.http.get("/check_update").get_json()
+
+        self.assertEqual(body["branch"], "refactor/modularize-server")
+        self.assertEqual(body["tracking"], "origin/refactor/modularize-server")
+        self.assertEqual(body["commits_behind"], 3)
+        self.assertIs(body["has_update"], True)
+
+    def test_a_branch_with_no_release_of_its_own_still_reports_an_update(self):
+        # The release feed describes main. A branch that has never been
+        # released from would otherwise look permanently up to date.
+        self.on_branch("topic", behind=5)
+        with mock.patch("requests.get",
+                        return_value=_fake_response({"tag_name": "v" + read_version()})):
+            body = self.http.get("/check_update").get_json()
+
+        self.assertIs(body["has_update"], True)
+        self.assertEqual(body["commits_behind"], 5)
+
+    def test_a_detached_head_is_reported_rather_than_updated(self):
+        self.on_branch("HEAD")
+        body = self.http.get("/check_update").get_json()
+
+        self.assertIs(body["has_update"], False)
+        self.assertIn("detached", body["error"])
+
+    def test_an_unreachable_remote_falls_back_to_comparing_versions(self):
+        self.on_branch("main", reachable=False)
+        with mock.patch("requests.get", return_value=_fake_response({"tag_name": "v9.9.9"})):
+            body = self.http.get("/check_update").get_json()
+
+        self.assertIsNone(body["commits_behind"])
+        self.assertIs(body["has_update"], True)
 
 
 class MalformedInputTests(RouteSmokeTestCase):
