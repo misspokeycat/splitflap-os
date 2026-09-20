@@ -34,6 +34,11 @@ class JavaScriptTests(unittest.TestCase):
         self.assertNotIn("FAIL", output)
         self.assertIn("PASS", output)
 
+    def test_camera_tuning_maths(self):
+        output = self.run_suite("test_camcal.js")
+        self.assertNotIn("FAIL", output)
+        self.assertIn("PASS", output)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -271,6 +271,7 @@
         <div style="display:flex;gap:8px;flex-wrap:wrap">
           <button class="btn btn-warning btn-sm" onclick="openAutoTune()">🎯 AUTO FINE-TUNE</button>
           <button class="btn btn-sm" style="background:#6f42c1;color:#fff" onclick="openTeachMode()">📖 TEACH MODE</button>
+          <button class="btn btn-sm" style="background:#0d7a6f;color:#fff" onclick="openCamCal()">📷 CAMERA TUNE</button>
           <button class="btn btn-success btn-sm" onclick="syncAllFromHardware()">SYNC ALL (EEPROM)</button>
           <button class="btn btn-warning btn-sm" onclick="homeAll()">HOME ALL</button>
         </div>
@@ -750,10 +751,135 @@
   </div>
 </div>
 
+<!-- ══════════ CAMERA CALIBRATION OVERLAY ══════════ -->
+<div class="modal-overlay" id="camCalOverlay">
+  <div class="modal-content">
+
+    <!-- Start -->
+    <div id="cc_start">
+      <h3 style="color:#3ec8b5;margin-bottom:12px">📷 Camera Tune</h3>
+      <p style="color:#aaa;font-size:.9rem;line-height:1.6">
+        Point a camera at the display. Every module is stepped through the same flap positions,
+        photographed once they stop moving, and read with OCR. A module showing the wrong character
+        is off by a whole number of flaps, which converts straight to a step correction.
+      </p>
+      <p style="color:#aaa;font-size:.85rem;line-height:1.6">
+        <strong style="color:#fff">Nothing is written during the sweep.</strong>
+        Corrections are collected here, shown to you, and written in one batch at the end.
+      </p>
+      <div style="margin:14px 0">
+        <label class="field-label">Positions to check</label>
+        <select id="ccSweepSet">
+          <option value="alpha" selected>Letters (A–Z) — 26 positions</option>
+          <option value="digit">Digits (0–9) — 10 positions</option>
+          <option value="both">Letters and digits — 36 positions</option>
+        </select>
+        <div style="color:#666;font-size:.75rem;margin-top:4px">
+          Blanks, symbols and the colour tiles are skipped — they either do not OCR or are easy to confuse.
+        </div>
+      </div>
+      <div style="display:flex;gap:10px;margin:14px 0">
+        <div style="flex:1">
+          <label class="field-label">Min OCR confidence</label>
+          <input type="number" id="ccMinConf" value="60" min="0" max="100">
+        </div>
+        <div style="flex:1">
+          <label class="field-label">Max plausible error (flaps)</label>
+          <input type="number" id="ccMaxFlaps" value="2" min="1" max="8">
+        </div>
+      </div>
+      <div style="color:#666;font-size:.75rem;margin-bottom:14px">
+        Reads below the confidence floor, or implying an error larger than the flap limit, are
+        discarded as misreads rather than written.
+      </div>
+      <div style="display:flex;gap:8px;margin-top:16px">
+        <button class="btn btn-success" style="flex:1" onclick="ccBeginCamera()">Start Camera</button>
+        <button class="btn" style="background:#333;color:#aaa;border:1px solid #555" onclick="closeCamCal()">Cancel</button>
+      </div>
+    </div>
+
+    <!-- Register corners -->
+    <div id="cc_register" style="display:none">
+      <h3 style="color:#3ec8b5;margin-bottom:10px">Line Up the Grid</h3>
+      <div id="ccCamError" class="cc-error" style="display:none">
+        <strong style="color:var(--orange)">Camera unavailable</strong>
+        <div id="ccCamErrorText" style="margin-top:8px;color:#bbb;font-size:.85rem;line-height:1.6"></div>
+      </div>
+      <div class="cc-stage">
+        <video id="ccVideo" playsinline muted onclick="ccTapVideo(event)"></video>
+        <canvas id="ccOverlay" onclick="ccTapVideo(event)"></canvas>
+      </div>
+      <div id="ccRegHint" class="cc-hint"></div>
+      <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
+        <button class="btn btn-success btn-sm" id="ccRegNext" style="display:none" onclick="ccShow('preview')">Looks Right</button>
+        <button class="btn btn-secondary btn-sm" id="ccRegUndo" style="display:none" onclick="ccUndoCorner()">Undo Corner</button>
+        <button class="btn btn-sm" style="background:#333;color:#aaa;border:1px solid #555" onclick="closeCamCal()">Cancel</button>
+      </div>
+    </div>
+
+    <!-- Confirm and begin -->
+    <div id="cc_preview" style="display:none">
+      <h3 style="color:#3ec8b5;margin-bottom:10px">Ready</h3>
+      <p style="color:#aaa;font-size:.85rem;line-height:1.6">
+        Keep the camera still for the whole run — the grid is registered against this exact view, and
+        it also learns how much the picture shakes so it can tell a turning reel from camera noise.
+        Prop the phone up if you can.
+      </p>
+      <p style="color:#aaa;font-size:.85rem;line-height:1.6">
+        The running app will be stopped and all modules homed first.
+      </p>
+      <div style="display:flex;gap:8px;margin-top:16px;flex-wrap:wrap">
+        <button class="btn btn-success" style="flex:1" onclick="ccBegin()">Home &amp; Begin Sweep</button>
+        <button class="btn btn-secondary btn-sm" onclick="ccShow('register')">Re-align</button>
+        <button class="btn btn-sm" style="background:#333;color:#aaa;border:1px solid #555" onclick="closeCamCal()">Cancel</button>
+      </div>
+    </div>
+
+    <!-- Homing -->
+    <div id="cc_homing" style="display:none">
+      <h3 style="color:#3ec8b5;margin-bottom:12px">Getting Ready</h3>
+      <div style="width:40px;height:40px;border:3px solid #333;border-top-color:#3ec8b5;border-radius:50%;animation:spin 1s linear infinite;margin:24px auto"></div>
+      <div id="ccHomingStatus" style="text-align:center;color:#aaa;font-size:.9rem"></div>
+    </div>
+
+    <!-- Sweep -->
+    <div id="cc_sweep" style="display:none">
+      <h3 style="color:#3ec8b5;margin-bottom:6px">Sweeping</h3>
+      <div id="ccSweepLabel" style="color:#ddd;font-size:.9rem"></div>
+      <div class="tm-progress-bar"><div class="tm-progress-fill" id="ccSweepBar" style="width:0%;background:#3ec8b5"></div></div>
+      <div id="ccSweepNote" style="color:#888;font-size:.8rem;min-height:1.2em"></div>
+      <div class="cc-grid" id="ccSweepGrid"></div>
+      <div style="color:#666;font-size:.75rem;margin-bottom:10px">
+        Green = read and correct · red = a correction is staged · grey = not read yet.
+      </div>
+      <button class="btn btn-warning btn-sm" onclick="ccAbortSweep()">Stop Sweep</button>
+    </div>
+
+    <!-- Review -->
+    <div id="cc_review" style="display:none">
+      <h3 style="color:#3ec8b5;margin-bottom:10px">Review</h3>
+      <div id="ccReviewSummary" style="color:#ddd;font-size:.9rem;line-height:1.6;margin-bottom:10px"></div>
+      <div class="cc-grid" id="ccReviewGrid"></div>
+      <div style="color:#666;font-size:.75rem;margin-bottom:10px">
+        A red cell shows how many positions that module needs corrected. Grey means it was never read.
+      </div>
+      <div id="ccSystemic" class="cc-note" style="display:none"></div>
+      <div id="ccAudit" class="cc-note" style="display:none"></div>
+      <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap">
+        <button class="btn btn-success" style="flex:1" id="ccApplyBtn" onclick="ccApply()">Apply Corrections</button>
+        <button class="btn btn-secondary btn-sm" onclick="ccRestart()">Sweep Again</button>
+        <button class="btn btn-sm" style="background:#333;color:#aaa;border:1px solid #555" onclick="closeCamCal()">Close</button>
+      </div>
+    </div>
+
+  </div>
+</div>
+
 <!-- TOAST -->
 <div class="toast-container" id="toastContainer"></div>
 
 <script src="/static/app.js?v={{ version }}"></script>
+<script src="/static/camcal.js?v={{ version }}"></script>
 
 </body>
 </html>
