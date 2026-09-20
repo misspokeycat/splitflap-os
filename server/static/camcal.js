@@ -31,6 +31,8 @@ const CC_NOISE_MIN      = 2.0;
 const CC_CELL_INSET     = 0.14;  // trim each cell toward its centre, away from bezels
 const CC_PREVIEW_MS     = 50;    // live overlay redraw interval
 const CC_MAX_PASSES     = 4;     // ceiling on write/re-read rounds
+const CC_CONFIRM_WAIT_MS = 1500; // let the modules finish committing before reading back
+const CC_CONFIRM_TRIES  = 3;     // how many times to wait for them
 const CC_REGISTER_CHARS = 'wyog'; // solid colour flaps, brightest first
 
 // Which flaps to visit. Matching compares images, so the colour tiles and
@@ -136,14 +138,18 @@ function ccImageFromGray(gray, w, h){
 }
 
 function ccDumpAdd(name, bytes){
-  if(!cc.dump) return;
+  if(!cc.dump) return false;
   if(cc.dump.bytes + bytes.length > CC_DUMP_MAX_BYTES){
-    showToast('Capture dump stopped — ' + ccBytes(CC_DUMP_MAX_BYTES) + ' collected', 'warn');
+    if(!cc.dump.full){
+      showToast('Capture dump full at ' + ccBytes(CC_DUMP_MAX_BYTES) +
+                ' — the rest of the run is not being saved', 'warn');
+    }
     cc.dump.full = true;
-    return;
+    return false;
   }
   cc.dump.files.push({ name: name, bytes: bytes });
   cc.dump.bytes += bytes.length;
+  return true;
 }
 
 // Finish the manifest and hand the whole session over as one file.
@@ -153,6 +159,7 @@ function ccDumpFinish(){
   cc.dump.manifest.corners    = cc.corners;
   cc.dump.manifest.homography = cc.H;
   cc.dump.manifest.threshold  = cc.threshold;
+  cc.dump.manifest.truncated  = !!cc.dump.full;
   cc.dump.manifest.history    = cc.history;
   cc.dump.manifest.outcome    = cc.outcome;
   cc.dump.manifest.video      = cc.video
@@ -943,35 +950,75 @@ async function ccWaitForFrameQuiet(){
 const CC_TPL_W    = 24;     // matching resolution; the glyphs are huge
 const CC_TPL_H    = 60;
 const CC_TPL_CONF = 1200;   // margin -> the 0-100 confidence the UI filters on
+const CC_TPL_CHROMA = 2;    // how hard the colour planes pull against the shape
+const CC_TPL_ALIKE = 0.93;  // two references this similar cannot be told apart
+// One length for features and references alike. They are compared element by
+// element, so the two drifting apart reads off the end of the shorter one and
+// every correlation comes back NaN.
+const CC_TPL_PLANES = 3;    // brightness, and two colour differences
+const CC_TPL_LEN = CC_TPL_W * CC_TPL_H * CC_TPL_PLANES;
 
 // Downsample to a small patch, then zero-mean and unit-norm it so a dot
 // product between two of them is normalised cross-correlation — which is what
 // makes the comparison indifferent to exposure and overall brightness.
+// Shape from brightness, and the flap's colour alongside it.
+//
+// Brightness alone cannot tell the colour tiles apart: they are solid
+// rectangles that differ only in hue, and subtracting the mean — which is
+// what makes the comparison indifferent to exposure — throws away the only
+// thing that distinguished them. Measured on a capture that swept all 63
+// flaps, orange and yellow correlated at 0.994 and every pair of tiles above
+// 0.94, so which one a module was showing was a coin toss.
+//
+// So the brightness plane is mean-subtracted as before, and two colour
+// difference planes are carried beside it un-subtracted, because for a solid
+// tile the mean is the signal. On the same capture that took identification
+// from 81.2% to 89.4% and the worst pair of tiles from 0.994 to 0.814. For a
+// letter, which is near-grey, the colour planes are close to zero and the
+// result is what it always was.
 function ccFeatures(cell){
-  const g = ccGrayOf(cell), w = cell.width, h = cell.height;
-  const f = new Float64Array(CC_TPL_W * CC_TPL_H);
+  const w = cell.width, h = cell.height, px = cell.data;
+  const n = CC_TPL_W * CC_TPL_H;
+  const f = new Float64Array(CC_TPL_LEN);
+
   for(let y = 0; y < CC_TPL_H; y++){
     const y0 = Math.floor(y * h / CC_TPL_H);
     const y1 = Math.max(y0 + 1, Math.floor((y + 1) * h / CC_TPL_H));
     for(let x = 0; x < CC_TPL_W; x++){
       const x0 = Math.floor(x * w / CC_TPL_W);
       const x1 = Math.max(x0 + 1, Math.floor((x + 1) * w / CC_TPL_W));
-      let sum = 0, n = 0;
+      let r = 0, g = 0, b = 0, count = 0;
       for(let yy = y0; yy < y1; yy++){
-        for(let xx = x0; xx < x1; xx++){ sum += g[yy * w + xx]; n++; }
+        for(let xx = x0; xx < x1; xx++){
+          const o = (yy * w + xx) * 4;
+          r += px[o]; g += px[o + 1]; b += px[o + 2];
+          count++;
+        }
       }
-      f[y * CC_TPL_W + x] = sum / n;
+      r /= count; g /= count; b /= count;
+      const i = y * CC_TPL_W + x;
+      f[i]         = r * 0.299 + g * 0.587 + b * 0.114;
+      f[n + i]     = CC_TPL_CHROMA * (r - g);
+      f[n * 2 + i] = CC_TPL_CHROMA * (g - b);
     }
   }
-  return ccNormalise(f);
+
+  // Only the brightness plane loses its mean. Removing it from the colour
+  // planes too would undo the whole point of carrying them.
+  let mean = 0;
+  for(let i = 0; i < n; i++) mean += f[i];
+  mean /= n;
+  for(let i = 0; i < n; i++) f[i] -= mean;
+
+  return ccUnitNorm(f);
 }
 
-function ccNormalise(f){
-  let mean = 0;
-  for(let i = 0; i < f.length; i++) mean += f[i];
-  mean /= f.length;
+// Scale to unit length, without touching the mean — ccFeatures has already
+// taken the mean out of the plane it belongs in, and taking it out again
+// across all three would undo the colour planes it deliberately kept.
+function ccUnitNorm(f){
   let ss = 0;
-  for(let i = 0; i < f.length; i++){ f[i] -= mean; ss += f[i] * f[i]; }
+  for(let i = 0; i < f.length; i++) ss += f[i] * f[i];
   const inv = ss > 0 ? 1 / Math.sqrt(ss) : 0;
   for(let i = 0; i < f.length; i++) f[i] *= inv;
   return f;
@@ -990,14 +1037,14 @@ function ccBuildTemplates(samples){
   for(const idx of Object.keys(samples)){
     const stack = Object.keys(samples[idx]).map(m => samples[idx][m]);
     if(stack.length < 3) continue;          // too few to outvote a bad one
-    const v = new Float64Array(CC_TPL_W * CC_TPL_H);
+    const v = new Float64Array(CC_TPL_LEN);
     const column = new Float64Array(stack.length);
     for(let px = 0; px < v.length; px++){
       for(let k = 0; k < stack.length; k++) column[k] = stack[k][px];
       const sorted = Array.prototype.slice.call(column).sort((a, b) => a - b);
       v[px] = sorted[sorted.length >> 1];
     }
-    templates[idx] = ccNormalise(v);
+    templates[idx] = ccUnitNorm(v);
   }
   return templates;
 }
@@ -1006,13 +1053,21 @@ function ccBuildTemplates(samples){
 // runner-up. A thin margin means two flaps look alike here, or the card was
 // caught mid-turn — either way it is not something to write to EEPROM.
 function ccMatch(feature, templates){
-  let best = -2, bestIdx = -1, second = -2;
+  let best = -2, bestIdx = -1, second = -2, secondIdx = -1;
   for(const key of Object.keys(templates)){
     const s = ccCorrelate(feature, templates[key]);
-    if(s > best){ second = best; best = s; bestIdx = parseInt(key); }
-    else if(s > second){ second = s; }
+    if(s > best){ second = best; secondIdx = bestIdx; best = s; bestIdx = parseInt(key); }
+    else if(s > second){ second = s; secondIdx = parseInt(key); }
   }
   if(bestIdx < 0) return null;
+
+  // Two flaps whose reference images are nearly identical cannot be told
+  // apart by any margin between them — the margin is measuring noise. Say so
+  // rather than pick, because the answer becomes an EEPROM write.
+  if(secondIdx >= 0 &&
+     ccCorrelate(templates[bestIdx], templates[secondIdx]) > CC_TPL_ALIKE){
+    return { index: bestIdx, margin: 0, conf: 0, alike: secondIdx };
+  }
   const margin = second > -2 ? best - second : 1;
   return {
     index: bestIdx,
@@ -1031,8 +1086,8 @@ function ccReadsFrom(samples, templates, idx){
     if(!f) continue;
     const hit = ccMatch(f, templates);
     if(!hit) continue;
-    const map = getCharMap(m);
-    reads[m] = { char: map[hit.index] || '', conf: hit.conf, margin: hit.margin };
+    reads[m] = { index: hit.index, char: getCharMap(m)[hit.index] || '',
+                 conf: hit.conf, margin: hit.margin };
   }
   return reads;
 }
@@ -1132,8 +1187,15 @@ async function ccRunUntilClean(){
     ccShow('review');
     ccRenderReview();
     ccStatus('Pass ' + cc.pass + ': writing ' + wrong + ' correction(s)…');
-    const ok = await ccWriteCorrections();
-    if(!ok){ cc.outcome = 'write-failed'; break; }
+    const written = await ccWriteCorrections();
+    if(!written.confirmed){
+      // Reading the display again now would measure a half-written state and
+      // write corrections on top of corrections.
+      cc.outcome = written.reason === 'unreadable' ? 'unverified' : 'write-pending';
+      if(written.failed) cc.outcome = 'write-failed';
+      break;
+    }
+    ccStatus('');
   }
 
   cc.running = false;
@@ -1199,7 +1261,7 @@ async function ccSweepPass(){
 
     if(cc.dump){
       note.textContent = 'Saving frames…';
-      ccDumpPosition(idx, cells);
+      ccDumpFrames(idx, cells);
     }
   }
 
@@ -1213,6 +1275,7 @@ async function ccSweepPass(){
     for(const idx of seen){
       ccScoreReads(idx, ccReadsFrom(samples, templates, idx), positions[idx]);
     }
+    ccDumpReadings();
     ccRenderSweepGrid();
   }
 
@@ -1222,33 +1285,48 @@ async function ccSweepPass(){
 
 // One position's crops, each named for the pass, position and module that
 // produced it, alongside what was expected of it and what was made of it.
-function ccDumpPosition(idx, cells){
-  const modules = [];
+// The frames go down as they are taken; what was made of them cannot, because
+// nothing has been made of them yet. Matching needs the whole pass before it
+// has anything to compare against, so the readings are filled in afterwards
+// by ccDumpReadings. Recording them here wrote a manifest of nulls.
+function ccDumpFrames(idx, cells){
+  if(!cc.dump) return;
+  const kept = [];
   for(let m = 0; m < cc.count; m++){
     const name = 'p' + cc.pass + '_i' + String(idx).padStart(2, '0') +
-                 '_m' + String(m).padStart(2, '0');
-    ccDumpAdd(name + '.png', ccPngOf(cells[m]));
-    const scored = (cc.results[m] || {})[idx];
-    const live   = cc.live[m] || {};
-    modules.push({
-      id:       m,
-      file:     name + '.png',
-      expected: getCharMap(m)[idx],
-      read:     scored ? scored.read : (live.char || null),
-      conf:     scored ? scored.conf : null,
-      err:      scored ? scored.err  : null,
-      from:     scored ? scored.from : null,
-      to:       scored ? scored.to   : null,
-      // Recorded per reading rather than looked up later: these are what the
-      // correction was computed from, and settings.json can change after.
-      cal:      parseInt((cc.settings && cc.settings.calibrations &&
-                          cc.settings.calibrations[String(m)]) || 4096),
-      flaps:    getFlapCount(m),
+                 '_m' + String(m).padStart(2, '0') + '.png';
+    if(!ccDumpAdd(name, ccPngOf(cells[m]))) break;   // out of room; stop here
+    kept.push({ id: m, file: name });
+  }
+  if(kept.length){
+    cc.dump.manifest.positions.push({
+      pass: cc.pass, index: idx, char: getCharMap(0)[idx], modules: kept,
     });
   }
-  cc.dump.manifest.positions.push({
-    pass: cc.pass, index: idx, char: getCharMap(0)[idx], modules: modules,
-  });
+}
+
+// Fill in what the pass concluded, against the frames it actually kept.
+function ccDumpReadings(){
+  if(!cc.dump) return;
+  for(const pos of cc.dump.manifest.positions){
+    if(pos.pass !== cc.pass) continue;
+    for(const mod of pos.modules){
+      const scored = (cc.results[mod.id] || {})[pos.index];
+      const live   = cc.live[mod.id] || {};
+      mod.expected = getCharMap(mod.id)[pos.index];
+      mod.read     = scored ? scored.read : (live.char || null);
+      mod.matched  = scored ? scored.matched : null;
+      mod.conf     = scored ? scored.conf : null;
+      mod.err      = scored ? scored.err  : null;
+      mod.from     = scored ? scored.from : null;
+      mod.to       = scored ? scored.to   : null;
+      // Recorded per reading rather than looked up later: these are what the
+      // correction was computed from, and settings.json can change after.
+      mod.cal      = parseInt((cc.settings && cc.settings.calibrations &&
+                               cc.settings.calibrations[String(mod.id)]) || 4096);
+      mod.flaps    = getFlapCount(mod.id);
+    }
+  }
 }
 
 // Turn one frame's reads into staged corrections.
@@ -1260,7 +1338,11 @@ function ccScoreReads(idx, reads, positions){
     const r       = reads[m];
     const map     = getCharMap(m);
     const flaps   = getFlapCount(m);
-    const readIdx = (r && r.char) ? map.indexOf(r.char) : -1;
+    // The matcher names a flap outright; indexOf is the fallback for a
+    // reading that only carries a character, and is wrong the moment a
+    // character map lists the same character twice.
+    const readIdx = !r ? -1
+      : (r.index !== undefined ? r.index : (r.char ? map.indexOf(r.char) : -1));
 
     if(readIdx < 0 || !r || r.conf < minConf){
       cc.unread[m] = (cc.unread[m] || 0) + 1;
@@ -1291,7 +1373,8 @@ function ccScoreReads(idx, reads, positions){
     to = Math.max(0, Math.min(cal - 1, to));
 
     if(!cc.results[m]) cc.results[m] = {};
-    cc.results[m][idx] = { read: r.char, conf: Math.round(r.conf), err: err, from: from, to: to };
+    cc.results[m][idx] = { read: r.char, matched: readIdx, conf: Math.round(r.conf),
+                           err: err, from: from, to: to };
     cc.live[m] = { char: r.char, err: err };
   }
 }
@@ -1348,6 +1431,8 @@ const CC_OUTCOME = {
   'exhausted':    ['var(--orange)', 'Stopped at the pass limit with corrections still outstanding.'],
   'stuck':        ['var(--orange)', 'The last pass was no better than the one before it, so it stopped rather than write again. What is left is likely mechanical, or a module the camera cannot read.'],
   'write-failed': ['var(--red)',    'A write failed; nothing further was attempted.'],
+  'write-pending': ['var(--orange)', 'The corrections were sent but some modules did not read them back. Reading the display again now would measure a half-written state, so it stopped instead.'],
+  'unverified':   ['var(--orange)', 'The corrections were sent but could not be read back, so there is no evidence they landed. Nothing further was attempted.'],
 };
 
 function ccRenderReview(){
@@ -1436,7 +1521,7 @@ async function ccWriteCorrections(){
     }
     changed[String(m)] = pairs;
   }
-  if(!count) return true;
+  if(!count) return { confirmed: true };
 
   try {
     const res  = await fetch('/apply_tuning', {
@@ -1447,7 +1532,7 @@ async function ccWriteCorrections(){
     if(data.status !== 'success') throw new Error(data.error || data.message || 'Write rejected');
   } catch(err){
     showToast('Write failed: ' + err.message, 'error');
-    return false;
+    return { confirmed: false, failed: true, reason: 'write' };
   }
 
   // What we just wrote is now what is stored, so the next pass measures
@@ -1457,12 +1542,13 @@ async function ccWriteCorrections(){
     cc.settings.tuned_chars[key] =
       Object.assign({}, cc.settings.tuned_chars[key] || {}, changed[key]);
   }
-  await ccAudit(Object.keys(changed).map(Number));
-  return true;
+  return await ccConfirmWrites(Object.keys(changed).map(Number));
 }
 
 // Storage on this hardware drops writes quietly. Read the modules back and
 // say whether they actually kept what we just sent.
+// Read the modules back and report which ones do not hold what we just
+// sent. Returns the offending ids, or null if the audit could not be run.
 async function ccAudit(ids){
   const audit = document.getElementById('ccAudit');
   audit.style.display = 'block';
@@ -1479,11 +1565,35 @@ async function ccAudit(ids){
       ? '<strong style="color:var(--orange)">' + bad.length + ' module(s) did not read back clean:</strong> ' +
         bad.map(x => x.id + ' (' + x.status + ')').join(', ') +
         '<br><span style="color:#999">A dropped EEPROM write during motor draw looks exactly like ' +
-        'this. Another pass will rewrite them.</span>'
+        'this.</span>'
       : '<strong style="color:var(--green)">All written modules read back clean.</strong>';
+    return bad.map(x => x.id);
   } catch(err){
     audit.innerHTML = '<span style="color:var(--orange)">Could not verify: ' + err.message + '</span>';
+    return null;
   }
+}
+
+// Do not start reading the display again until the modules actually hold the
+// corrections. A write returns when the last command has been put on the bus,
+// which is not the same as every module having committed it to EEPROM — and a
+// pass that starts in between reads a display that is half corrected, counts
+// the difference as fresh error, and writes again on top of it.
+async function ccConfirmWrites(ids){
+  const audit = document.getElementById('ccAudit');
+  for(let attempt = 1; attempt <= CC_CONFIRM_TRIES; attempt++){
+    await ccSleep(CC_CONFIRM_WAIT_MS);
+    const bad = await ccAudit(ids);
+    if(bad === null) return { confirmed: false, reason: 'unreadable' };
+    if(!bad.length) return { confirmed: true };
+    if(attempt < CC_CONFIRM_TRIES){
+      audit.innerHTML += '<br><span style="color:#999">Waiting for ' + bad.length +
+        ' module(s) to settle, attempt ' + (attempt + 1) + ' of ' + CC_CONFIRM_TRIES + '…</span>';
+    } else {
+      return { confirmed: false, reason: 'pending', pending: bad };
+    }
+  }
+  return { confirmed: false, reason: 'pending' };
 }
 
 // Manual "Apply", for a single-pass run.
@@ -1491,10 +1601,16 @@ async function ccApply(){
   const btn = document.getElementById('ccApplyBtn');
   btn.disabled = true;
   btn.textContent = 'Writing…';
-  const ok = await ccWriteCorrections();
-  btn.textContent = ok ? 'Applied' : 'Apply Corrections';
-  if(!ok) btn.disabled = false;
-  else showToast('Corrections written — re-check to confirm they took');
+  const written = await ccWriteCorrections();
+  btn.textContent = written.confirmed ? 'Applied' : 'Apply Corrections';
+  if(!written.confirmed){
+    btn.disabled = false;
+    showToast(written.reason === 'pending'
+      ? 'Some modules have not taken the write yet'
+      : 'Write could not be confirmed', 'warn');
+  } else {
+    showToast('Corrections written and read back — re-check to confirm they took');
+  }
 }
 
 // Read everything again without writing. The only thing that proves a
