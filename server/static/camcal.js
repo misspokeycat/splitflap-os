@@ -35,6 +35,7 @@ const CC_CONFIRM_WAIT_MS = 1500; // let the modules finish committing before rea
 const CC_CONFIRM_TRIES  = 3;     // how many times to wait for them
 const CC_FIX_TRIES      = 6;     // nudges allowed at one position before giving up
 const CC_DEFAULT_STEP   = 25;    // steps per nudge, the figure Auto Fine-Tune uses
+const CC_MOVE_START_MS  = 2500;  // how long to allow a commanded move to get going
 const CC_REGISTER_CHARS = 'wyog'; // solid colour flaps, brightest first
 
 // Which flaps to visit. Matching compares images, so the colour tiles and
@@ -899,6 +900,29 @@ async function ccLearnNoiseFloor(){
   return cc.threshold;
 }
 
+// A reel turns one way, so going back a few steps means going almost all the
+// way round — seconds, not milliseconds. Waiting for stillness alone is not
+// enough: the four quiet frames that mean "settled" can all happen before the
+// module has started, and then the frame read is the one from before the
+// move. Forward nudges are short enough to hide this; backward ones are not,
+// which is why only they appeared to do nothing.
+async function ccWaitForMoveToStart(timeoutMs){
+  const t0 = performance.now();
+  let prev = null;
+  while(performance.now() - t0 < timeoutMs){
+    if(cc.abort) return false;
+    const cur = ccGrabCells(CC_MOTION_W, CC_MOTION_H, CC_MOTION_MAX_W).map(ccGrayOf);
+    if(prev){
+      for(let i = 0; i < cur.length; i++){
+        if(ccMad(prev[i], cur[i]) > cc.threshold) return true;
+      }
+    }
+    prev = cur;
+    await ccSleep(CC_FRAME_MS);
+  }
+  return false;                    // nothing moved; nothing needed to
+}
+
 async function ccWaitForSettle(onTick){
   const t0 = performance.now();
   let prev = null, stable = 0, moving = [];
@@ -1180,6 +1204,7 @@ async function ccRunUntilClean(){
       body: JSON.stringify({ action: 'goto_char', char_index: idx }),
     });
 
+    await ccWaitForMoveToStart(CC_MOVE_START_MS);
     const settle = await ccWaitForSettle(function(moving){
       note.textContent = moving.length
         ? 'Waiting — ' + moving.length + ' module' + (moving.length === 1 ? '' : 's') + ' still turning'
@@ -1244,6 +1269,11 @@ function ccFinishRun(){
   ccShow('review');
 }
 
+// A reel is a loop: the step after the last one is the first one.
+function ccWrapStep(step, cal){
+  return ((Math.round(step) % cal) + cal) % cal;
+}
+
 // How far one nudge moves a module. Small on purpose: the flap that is
 // showing says which way to go, not how far, so this is repeated and looked
 // at rather than computed once. 25 steps is what Auto Fine-Tune uses.
@@ -1286,6 +1316,7 @@ async function ccMoveTo(moves, idx){
 
 // Read one position again and re-score just it.
 async function ccRereadPosition(idx){
+  await ccWaitForMoveToStart(CC_MOVE_START_MS);
   const settle = await ccWaitForSettle();
   if(!settle.settled) return false;
   const cells = ccGrabCells(cc.cellW, cc.cellH);
@@ -1445,8 +1476,11 @@ function ccScoreReads(idx, reads, positions){
     // by hand at 25 steps a click, and it is the only part of this that ever
     // worked on this display. Reading the character ahead means the module
     // overshot, so it goes back.
-    let to = Math.round(from - Math.sign(err) * ccStepSize());
-    to = Math.max(0, Math.min(cal - 1, to));
+    // Wrapped, not clamped. Step 0 and step cal-1 are neighbours on a reel,
+    // so clamping at zero quietly turned every backward nudge near the start
+    // of the drum into no move at all — and only backward ones, because
+    // forward never reaches that edge.
+    const to = ccWrapStep(Math.round(from - Math.sign(err) * ccStepSize()), cal);
 
     if(!cc.results[m]) cc.results[m] = {};
     cc.results[m][idx] = { read: r.char, matched: readIdx, conf: Math.round(r.conf),

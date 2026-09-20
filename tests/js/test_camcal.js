@@ -33,12 +33,13 @@ const controls = { ccMinConf: { value: '60' }, ccMaxFlaps: { value: '2' },
                    ccStepSize: { value: String(NUDGE) } };
 
 const code = ['ccSolveH', 'ccGauss', 'ccApplyH', 'ccScaleH', 'ccCellQuad', 'ccScoreReads',
-              'ccCornerModules', 'ccCornerCentres', 'ccOtsu', 'ccFindBlobs', 'ccStepSize']
+              'ccCornerModules', 'ccCornerCentres', 'ccOtsu', 'ccFindBlobs', 'ccStepSize',
+              'ccWrapStep']
   .map(grab).join('\n');
 const api = new Function(
   'cc', 'CC_CELL_INSET', 'document', 'getCharMap', 'getFlapCount',
   code + '; return {ccSolveH, ccApplyH, ccScaleH, ccCellQuad, ccScoreReads,' +
-         ' ccCornerModules, ccCornerCentres, ccOtsu, ccFindBlobs, ccStepSize};'
+         ' ccCornerModules, ccCornerCentres, ccOtsu, ccFindBlobs, ccStepSize, ccWrapStep};'
 )(
   cc, 0.14,
   { getElementById: id => controls[id] },
@@ -166,15 +167,31 @@ api.ccScoreReads(at, readsOf({}), positions);
 check('a module that read as nothing is unread', cc.unread[0], 1);
 check('every module unread when the frame is blank', Object.keys(cc.unread).length, cc.count);
 
-// A step is a position within one revolution; the correction must stay inside
-// it, because the server rejects anything else and the module cannot reach it.
+// A reel is a loop: step 0 and step cal-1 are neighbours. Clamping at the
+// ends instead of wrapping turned a backward nudge near the start of the
+// drum into no move at all, and only backward ones — forward never reaches
+// that edge. It is the sort of asymmetry that shows up as "reverse
+// corrections do not work".
 reset();
 api.ccScoreReads(1, readsOf({ 0: { char: CHAR_MAP[2], conf: 90 } }), { '0': { active: 10 } });
-check('correction clamps at zero', cc.results[0][1].to, 0);
+check('nudging back past zero wraps to the end of the reel',
+      cc.results[0][1].to, CAL - 15);
 
 reset();
 api.ccScoreReads(1, readsOf({ 0: { char: CHAR_MAP[0], conf: 90 } }), { '0': { active: CAL - 10 } });
-check('correction clamps below the calibration', cc.results[0][1].to, CAL - 1);
+check('nudging forward past the end wraps to the start', cc.results[0][1].to, 15);
+
+// Both directions move by the same amount from the same place.
+reset();
+api.ccScoreReads(at, readsOf({ 0: { char: CHAR_MAP[at + 1], conf: 90 } }), positions);
+const back = cc.results[0][at].to;
+reset();
+api.ccScoreReads(at, readsOf({ 0: { char: CHAR_MAP[at - 1], conf: 90 } }), positions);
+const forward = cc.results[0][at].to;
+check('a backward nudge is the same size as a forward one',
+      FROM - back, forward - FROM);
+check('and every result is a step the reel actually has',
+      [back, forward].every(v => v >= 0 && v < CAL), true);
 
 // Every module is scored from one frame — that is the whole point of moving
 // them in lockstep.

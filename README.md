@@ -136,6 +136,15 @@ it might be forty — so it is nudged 25 steps and looked at again, the same
 figure Auto Fine-Tune applies per click. Moving it a whole flap overshoots
 almost every time and lands it a flap out the other way.
 
+A reel turns one way, so the two directions do not cost the same. Nudging
+forward is a few steps; nudging back means going almost all the way round,
+which takes seconds. Two things had to change for that to work at all: the
+step space is treated as the loop it is, so a nudge back past step 0 wraps to
+the end of the reel rather than stopping at zero, and a re-read now waits for
+the move to *begin* before waiting for it to finish — the frames that mean
+"settled" can otherwise all happen before a long move has started, and the
+photograph is then of the position from before the nudge.
+
 Every write is checked against the reel before it lands. A reel turns one
 way, so a module's positions have to climb round it in order and come back to
 the start after exactly one revolution; nothing mechanical moves a flap past
