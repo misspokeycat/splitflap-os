@@ -791,10 +791,17 @@
           <label class="field-label">Max plausible error (flaps)</label>
           <input type="number" id="ccMaxFlaps" value="2" min="1" max="8">
         </div>
+        <div style="flex:1">
+          <label class="field-label">Steps per nudge</label>
+          <input type="number" id="ccStepSize" value="25" min="1" max="64">
+        </div>
       </div>
       <div style="color:#666;font-size:.75rem;margin-bottom:14px">
         A match is confident when it beats the runner-up clearly. Anything below the floor, or
         implying an error larger than the flap limit, is discarded rather than written.
+        The flap that is showing says which way to move, not how far — a module on the wrong flap
+        is somewhere past the boundary, so it is nudged and looked at again rather than moved a
+        whole flap. 25 steps is what Auto Fine-Tune uses by hand.
       </div>
       <label class="cc-check">
         <input type="checkbox" id="ccAuto" checked>
@@ -802,16 +809,6 @@
         that flap again before moving on. A flap that will not come right is named, rather than
         turning up as a number at the end of a second full sweep.</span>
       </label>
-      <div style="margin:10px 0 4px">
-        <label class="field-label">Fine adjustment (steps, 0 to skip)</label>
-        <input type="number" id="ccFineStep" value="0" min="0" max="32">
-        <div style="color:#666;font-size:.75rem;margin-top:4px">
-          Identifying a flap can only ever correct by a whole flap — about
-          <strong>64 steps</strong> on a 64-flap reel. A module that is twenty steps out is on the
-          right flap and looks unseated anyway. With this set, each flap is also nudged by this
-          many steps either way and whichever sits closest to the rest of the display is kept.
-          Three extra photographs per flap, so it roughly triples the run.
-        </div>
       </div>
       <label class="cc-check">
         <input type="checkbox" id="ccDump">

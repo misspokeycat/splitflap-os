@@ -21,7 +21,7 @@ const grab = name => {
 };
 
 const CHAR_MAP = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$&()-+=;q:%'.,/?*roygbpw";
-const FLAPS = 64, CAL = 4096, STEPS_PER_FLAP = CAL / FLAPS;   // 64
+const FLAPS = 64, CAL = 4096, NUDGE = 25;   // a flap is 64 steps; a nudge is not
 
 const cc = {
   count: 45, cols: 15, rows: 3,
@@ -29,15 +29,16 @@ const cc = {
   settings: { calibrations: {}, tuned_chars: {} },
 };
 
-const controls = { ccMinConf: { value: '60' }, ccMaxFlaps: { value: '2' } };
+const controls = { ccMinConf: { value: '60' }, ccMaxFlaps: { value: '2' },
+                   ccStepSize: { value: String(NUDGE) } };
 
 const code = ['ccSolveH', 'ccGauss', 'ccApplyH', 'ccScaleH', 'ccCellQuad', 'ccScoreReads',
-              'ccCornerModules', 'ccCornerCentres', 'ccOtsu', 'ccFindBlobs']
+              'ccCornerModules', 'ccCornerCentres', 'ccOtsu', 'ccFindBlobs', 'ccStepSize']
   .map(grab).join('\n');
 const api = new Function(
   'cc', 'CC_CELL_INSET', 'document', 'getCharMap', 'getFlapCount',
   code + '; return {ccSolveH, ccApplyH, ccScaleH, ccCellQuad, ccScoreReads,' +
-         ' ccCornerModules, ccCornerCentres, ccOtsu, ccFindBlobs};'
+         ' ccCornerModules, ccCornerCentres, ccOtsu, ccFindBlobs, ccStepSize};'
 )(
   cc, 0.14,
   { getElementById: id => controls[id] },
@@ -119,17 +120,20 @@ const readsOf = spec => {
   return out;
 };
 
-// Showing the character one ahead means the module overshot: fewer steps.
-// This matches the manual flow, where "one ahead" applies a negative delta.
+// The flap that is showing says which way, not how far. A module past the
+// boundary might be five steps over or forty, so it is nudged and looked at
+// again — the same 25 steps Auto Fine-Tune applies by hand. Moving it a
+// whole flap would overshoot almost every time and land it a flap out the
+// other way, which is what a run that went from 171 wrong to 252 was doing.
 reset();
 api.ccScoreReads(at, readsOf({ 0: { char: CHAR_MAP[at + 1], conf: 92 } }), positions);
 check('overshoot recorded as +1 flap', cc.results[0][at].err, 1);
-check('overshoot subtracts one flap of steps', cc.results[0][at].to, FROM - STEPS_PER_FLAP);
+check('overshoot nudges back, it does not jump a flap', cc.results[0][at].to, FROM - NUDGE);
 
 reset();
 api.ccScoreReads(at, readsOf({ 0: { char: CHAR_MAP[at - 1], conf: 92 } }), positions);
 check('undershoot recorded as -1 flap', cc.results[0][at].err, -1);
-check('undershoot adds one flap of steps', cc.results[0][at].to, FROM + STEPS_PER_FLAP);
+check('undershoot nudges forward', cc.results[0][at].to, FROM + NUDGE);
 
 reset();
 api.ccScoreReads(at, readsOf({ 0: { char: CHAR_MAP[at], conf: 95 } }), positions);
@@ -143,7 +147,7 @@ reset();
 api.ccScoreReads(1, readsOf({ 0: { char: CHAR_MAP[63], conf: 90 } }),
                  { '0': { active: 64 } });
 check('wrap reads as the short way round', cc.results[0][1].err, -2);
-check('wrap corrects the short way round', cc.results[0][1].to, 64 + 2 * STEPS_PER_FLAP);
+check('wrap corrects the short way round', cc.results[0][1].to, 64 + NUDGE);
 
 // OCR noise must never become a write. A read implying a nineteen-flap error
 // is a misread of a huge clean capital, not a mechanism that slipped.
@@ -180,9 +184,9 @@ api.ccScoreReads(at, readsOf({
   7:  { char: CHAR_MAP[at],     conf: 90 },
   44: { char: CHAR_MAP[at - 1], conf: 90 },
 }), positions);
-check('module 0 corrected from the shared frame',  cc.results[0][at].to,  FROM - STEPS_PER_FLAP);
+check('module 0 corrected from the shared frame',  cc.results[0][at].to,  FROM - NUDGE);
 check('module 7 left alone from the shared frame', cc.results[7][at].err, 0);
-check('module 44 corrected from the shared frame', cc.results[44][at].to, FROM + STEPS_PER_FLAP);
+check('module 44 corrected from the shared frame', cc.results[44][at].to, FROM + NUDGE);
 
 // ── Registering from the four corner modules ───────────────
 

@@ -87,6 +87,21 @@ class StepSequenceTests(unittest.TestCase):
             with self.subTest(nudge=nudge):
                 self.assertNotEqual(self.problems(self.steps(**{"10": 640 + nudge})), [])
 
+    def test_repeated_nudges_at_one_flap_are_allowed(self):
+        # A correction is made by nudging, not by jumping, so one flap may
+        # legitimately drift a couple of nudges away from nominal before it
+        # lands on the right character.
+        for nudge in (-50, -25, 25, 50):
+            with self.subTest(nudge=nudge):
+                self.assertEqual(self.problems(self.steps(**{"10": 640 + nudge})), [])
+
+    def test_nudging_past_most_of_a_flap_is_caught(self):
+        # By here the flap would be sitting on its neighbour, and what the
+        # module actually has is a home offset rather than a bad position.
+        for nudge in (-75, 75):
+            with self.subTest(nudge=nudge):
+                self.assertNotEqual(self.problems(self.steps(**{"10": 640 + nudge})), [])
+
     def test_a_flap_placed_past_its_neighbour_is_caught(self):
         self.assertNotEqual(self.problems(self.steps(**{"10": 705})), [])
 

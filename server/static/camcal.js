@@ -33,8 +33,8 @@ const CC_PREVIEW_MS     = 50;    // live overlay redraw interval
 const CC_MAX_PASSES     = 4;     // ceiling on write/re-read rounds
 const CC_CONFIRM_WAIT_MS = 1500; // let the modules finish committing before reading back
 const CC_CONFIRM_TRIES  = 3;     // how many times to wait for them
-const CC_FIX_TRIES      = 3;     // attempts to get one position right
-const CC_REFINE_MARGIN  = 0.004; // a nudge has to beat standing still by this
+const CC_FIX_TRIES      = 6;     // nudges allowed at one position before giving up
+const CC_DEFAULT_STEP   = 25;    // steps per nudge, the figure Auto Fine-Tune uses
 const CC_REGISTER_CHARS = 'wyog'; // solid colour flaps, brightest first
 
 // Which flaps to visit. Matching compares images, so the colour tiles and
@@ -63,7 +63,10 @@ const cc = {
   pass:        0,
   outcome:     null,   // why the run stopped, see CC_OUTCOME
   settings:    null,
-  templates:   null,   // reference image per flap, built from the display
+  templates:   {},     // reference image per flap, built as the sweep reaches it
+  features:    {},     // this position's modules, kept for re-scoring after a nudge
+  positions:   {},     // what /tuning_status said each module was resting on
+  fixes:       [],     // how each corrected position turned out
   abort:       false,
   running:     false,
   drag:        null,   // index of the corner handle being dragged
@@ -1152,82 +1155,23 @@ async function ccBegin(){
 // Auto mode does the whole thing; otherwise it stops after the first pass and
 // waits to be told.
 async function ccRunUntilClean(){
-  const auto = document.getElementById('ccAuto').checked;
-  const fine = Math.max(0, parseInt(document.getElementById('ccFineStep').value) || 0);
-  const note = document.getElementById('ccSweepNote');
-
-  // One read of everything first, because the reference images are built out
-  // of it and nothing can be judged until they exist.
-  cc.pass++;
-  ccShow('sweep');
-  const swept = await ccSweepPass();
-  if(cc.abort){ cc.outcome = 'stopped'; return ccFinishRun(); }
-
-  cc.history.push(ccTotalWrong());
-  ccRenderHistory();
-  if(!auto){ cc.outcome = ccTotalWrong() === 0 ? 'done' : 'exhausted'; return ccFinishRun(); }
-
-  // Then one position at a time: correct it, move what was corrected, read
-  // it again, and only move on once it is right. A failure is one flap's
-  // worth of failure and it is named.
-  const bar = document.getElementById('ccSweepBar');
-  const report = [];
-  for(let n = 0; n < swept.seen.length; n++){
-    if(cc.abort) break;
-    const idx = swept.seen[n];
-    bar.style.width = Math.round((n / swept.seen.length) * 100) + '%';
-    document.getElementById('ccSweepLabel').textContent =
-      'Correcting position ' + (n + 1) + ' of ' + swept.seen.length +
-      ' — "' + getCharMap(0)[idx] + '"';
-
-    if(ccWrongAt(idx)){
-      const result = await ccFixPosition(idx, swept.positions, note);
-      report.push(result);
-      ccRenderSweepGrid();
-      if(result.refused) ccStatus('Flap "' + getCharMap(0)[idx] + '": ' + result.refused);
-    }
-    if(fine && !cc.abort) await ccRefinePosition(idx, swept.positions, fine, note);
-  }
-
-  bar.style.width = '100%';
-  cc.fixes = report;
-  const stuck = report.filter(r => !r.fixed);
-  cc.outcome = cc.abort ? 'stopped'
-             : stuck.length ? 'some-stuck'
-             : ccTotalWrong() === 0 ? 'done' : 'exhausted';
-  cc.history.push(ccTotalWrong());
-  return ccFinishRun();
-}
-
-function ccFinishRun(){
-  cc.running = false;
-  ccDumpFinish();
-  ccRenderHistory();
-  ccRenderReview();
-  ccShow('review');
-}
-
-// One read of every position. Nothing is written here.
-async function ccSweepPass(){
-  cc.running = true;
-  cc.results = {};
-  cc.unread  = {};
-  cc.live    = {};
-
+  const correct = document.getElementById('ccAuto').checked;
   const bar   = document.getElementById('ccSweepBar');
   const label = document.getElementById('ccSweepLabel');
   const note  = document.getElementById('ccSweepNote');
 
-  const samples = {}, positions = {}, seen = [];
+  cc.pass++;
+  cc.templates = {};
+  cc.fixes = [];
+  ccShow('sweep');
 
   for(let n = 0; n < cc.sweep.length; n++){
     if(cc.abort) break;
-    const idx   = cc.sweep[n];
-    const shown = getCharMap(0)[idx];
+    const idx = cc.sweep[n];
 
     bar.style.width = Math.round((n / cc.sweep.length) * 100) + '%';
-    label.textContent = 'Pass ' + cc.pass + ' · position ' + (n + 1) + ' of ' + cc.sweep.length +
-                        ' — "' + shown + '" (index ' + idx + ')';
+    label.textContent = 'Pass ' + cc.pass + ' · position ' + (n + 1) + ' of ' +
+                        cc.sweep.length + ' — "' + getCharMap(0)[idx] + '" (index ' + idx + ')';
 
     note.textContent = 'Moving…';
     cc.live = {};
@@ -1242,11 +1186,8 @@ async function ccSweepPass(){
         : 'Settling…';
     });
     if(settle.aborted) break;
-
     if(!settle.settled){
-      // Never read a frame we know is smeared: a bad read here becomes a bad
-      // tuning value later.
-      note.textContent = 'Skipped index ' + idx + ' — ' + settle.moving.length +
+      note.textContent = 'Skipped "' + getCharMap(0)[idx] + '" — ' + settle.moving.length +
                          ' module(s) never stopped';
       for(const m of settle.moving) cc.unread[m] = (cc.unread[m] || 0) + 1;
       await ccSleep(700);
@@ -1255,46 +1196,63 @@ async function ccSweepPass(){
 
     note.textContent = 'Reading…';
     const cells = ccGrabCells(cc.cellW, cc.cellH);
-    samples[idx] = {};
-    for(let m = 0; m < cc.count; m++) samples[idx][m] = ccFeatures(cells[m]);
+    if(cc.dump) ccDumpFrames(idx, cells);
 
-    const res  = await fetch('/tuning_status?char_index=' + idx);
-    positions[idx] = (await res.json()).positions || {};
-    seen.push(idx);
+    // The reference for this flap is the middle of what the display is
+    // showing right now, so it is ready the moment the frame is. Nothing
+    // here ever needed the rest of the sweep.
+    ccLearnPosition(idx, cells);
 
-    if(cc.dump){
-      note.textContent = 'Saving frames…';
-      ccDumpFrames(idx, cells);
-    }
-  }
+    const res = await fetch('/tuning_status?char_index=' + idx);
+    cc.positions[idx] = (await res.json()).positions || {};
+    ccScoreReads(idx, ccReadsFrom({ [idx]: cc.features }, cc.templates, idx), cc.positions[idx]);
 
-  // Classification waits for the whole pass, because the reference images
-  // are built out of it. Nothing to compare against until every module has
-  // been seen on every flap.
-  if(seen.length){
-    note.textContent = 'Building reference images from the display…';
-    cc.templates = ccBuildTemplates(samples);
-    for(const idx of seen){
-      ccScoreReads(idx, ccReadsFrom(samples, cc.templates, idx), positions[idx]);
-    }
+    // Correct it here, while the display is still on this flap. Waiting for
+    // the end of the sweep meant finding out forty minutes later that
+    // something had not taken, and not which something.
+    if(correct && ccWrongAt(idx)) cc.fixes.push(await ccFixPosition(idx, note));
+
     ccDumpReadings();
     ccRenderSweepGrid();
   }
 
   bar.style.width = '100%';
-  cc.running = false;
-  return { seen: seen, positions: positions };
+  const stuck = cc.fixes.filter(f => !f.fixed);
+  cc.history.push(ccTotalWrong());
+  cc.outcome = cc.abort ? 'stopped'
+             : !correct ? (ccTotalWrong() === 0 ? 'done' : 'exhausted')
+             : stuck.length ? 'some-stuck'
+             : 'done';
+  return ccFinishRun();
 }
 
-// ── Correcting one position at a time ──────────────────────
-//
-// Correcting the whole display and then re-reading the whole display tells
-// you, forty minutes later, that something did not take — and not which
-// something. A position is small enough to fix and check on the spot: write
-// the corrections for this flap, move the modules that got one, read it
-// again, and only then move on. What fails, fails visibly and locally.
+// Build this flap's reference from the frame just taken, and keep the
+// features so the position can be re-scored after a nudge without
+// photographing it again.
+function ccLearnPosition(idx, cells){
+  cc.features = {};
+  for(let m = 0; m < cc.count; m++) cc.features[m] = ccFeatures(cells[m]);
+  const built = ccBuildTemplates({ [idx]: cc.features });
+  if(built[idx]) cc.templates[idx] = built[idx];
+}
 
-// One position's corrections, as /apply_tuning wants them.
+function ccFinishRun(){
+  cc.running = false;
+  ccDumpFinish();
+  ccRenderHistory();
+  ccRenderReview();
+  ccShow('review');
+}
+
+// How far one nudge moves a module. Small on purpose: the flap that is
+// showing says which way to go, not how far, so this is repeated and looked
+// at rather than computed once. 25 steps is what Auto Fine-Tune uses.
+function ccStepSize(){
+  const el = document.getElementById('ccStepSize');
+  const value = el ? parseInt(el.value) : NaN;
+  return Number.isFinite(value) && value > 0 ? value : CC_DEFAULT_STEP;
+}
+
 function ccCorrectionsAt(idx){
   const tuned = {}, moves = [];
   for(let m = 0; m < cc.count; m++){
@@ -1327,13 +1285,16 @@ async function ccMoveTo(moves, idx){
 }
 
 // Read one position again and re-score just it.
-async function ccRereadPosition(idx, positions){
+async function ccRereadPosition(idx){
   const settle = await ccWaitForSettle();
   if(!settle.settled) return false;
   const cells = ccGrabCells(cc.cellW, cc.cellH);
-  const samples = { [idx]: {} };
-  for(let m = 0; m < cc.count; m++) samples[idx][m] = ccFeatures(cells[m]);
-  ccScoreReads(idx, ccReadsFrom(samples, cc.templates, idx), positions[idx] || {});
+  cc.features = {};
+  for(let m = 0; m < cc.count; m++) cc.features[m] = ccFeatures(cells[m]);
+  // The reference stays as it was learnt: rebuilding it from a display that
+  // is part-way through being corrected would move the target.
+  ccScoreReads(idx, ccReadsFrom({ [idx]: cc.features }, cc.templates, idx),
+               cc.positions[idx] || {});
   return true;
 }
 
@@ -1347,14 +1308,20 @@ function ccWrongAt(idx){
 }
 
 // Fix one position and prove it. Returns what happened, for the report.
-async function ccFixPosition(idx, positions, note){
+async function ccFixPosition(idx, note){
   for(let attempt = 1; attempt <= CC_FIX_TRIES; attempt++){
     const wrong = ccWrongAt(idx);
-    if(!wrong) return { idx: idx, fixed: true, attempts: attempt - 1 };
+    if(!wrong){
+      ccStatus('');
+      return { idx: idx, fixed: true, attempts: attempt - 1 };
+    }
 
     const { tuned, moves } = ccCorrectionsAt(idx);
-    note.textContent = 'Flap "' + getCharMap(0)[idx] + '": correcting ' + wrong +
-                       ' module(s), attempt ' + attempt + ' of ' + CC_FIX_TRIES + '…';
+    const progress = 'Flap "' + getCharMap(0)[idx] + '": nudging ' + wrong +
+                     ' module(s) by ' + ccStepSize() + ' steps, attempt ' + attempt +
+                     ' of ' + CC_FIX_TRIES;
+    note.textContent = progress + '…';
+    ccStatus(progress);          // and over the live view, which is what you watch
 
     const write = await ccPost('/apply_tuning', { tuned: tuned });
     if(!write.ok){
@@ -1366,88 +1333,11 @@ async function ccFixPosition(idx, positions, note){
 
     note.textContent = 'Flap "' + getCharMap(0)[idx] + '": checking…';
     await ccMoveTo(moves, idx);
-    if(!await ccRereadPosition(idx, positions)){
+    if(!await ccRereadPosition(idx)){
       return { idx: idx, fixed: false, refused: 'the reels never stopped' };
     }
   }
   return { idx: idx, fixed: ccWrongAt(idx) === 0, attempts: CC_FIX_TRIES };
-}
-
-// ── Finer than a flap ──────────────────────────────────────
-//
-// Identifying which flap a module shows can only ever produce corrections a
-// whole flap wide. A module twenty steps out is on the right flap, reports
-// no error, and gets nothing — while looking visibly unseated, because the
-// card has not finished falling.
-//
-// There is no need for a model of how steps turn into pixels. The reference
-// image is what this flap looks like across the whole display, so "seated
-// better" is just "correlates higher with it". Nudge everything a little one
-// way, photograph, nudge the other way, photograph, and keep whichever of
-// the three each module liked best. Three frames for the position rather
-// than three moves per module.
-async function ccRefinePosition(idx, positions, delta, note){
-  const base = [], scores = [];
-  for(let m = 0; m < cc.count; m++){
-    const scored = (cc.results[m] || {})[idx];
-    // Only modules already on the right flap; a whole-flap error is not
-    // something a nudge is going to help with.
-    base.push(scored && scored.err === 0 ? scored.to : null);
-    scores.push({});
-  }
-  if(!base.some(v => v !== null)) return 0;
-
-  for(const shift of [0, delta, -delta]){
-    note.textContent = 'Flap "' + getCharMap(0)[idx] + '": trying ' +
-                       (shift > 0 ? '+' : '') + shift + ' steps…';
-    const moves = [];
-    for(let m = 0; m < cc.count; m++){
-      if(base[m] === null) continue;
-      const cal = parseInt((cc.settings && cc.settings.calibrations &&
-                            cc.settings.calibrations[String(m)]) || 4096);
-      moves.push({ module: m, step: ((base[m] + shift) % cal + cal) % cal });
-    }
-    await ccMoveTo(moves, idx);
-    const settle = await ccWaitForSettle();
-    if(!settle.settled) return 0;
-    const cells = ccGrabCells(cc.cellW, cc.cellH);
-    const reference = cc.templates[idx];
-    if(!reference) return 0;
-    for(let m = 0; m < cc.count; m++){
-      if(base[m] === null) continue;
-      scores[m][shift] = ccCorrelate(ccFeatures(cells[m]), reference);
-    }
-  }
-
-  // Keep a nudge only where it clearly beat standing still, so camera noise
-  // does not get written to the display as tuning.
-  const tuned = {}, settled = [];
-  let moved = 0;
-  for(let m = 0; m < cc.count; m++){
-    if(base[m] === null) continue;
-    const at = scores[m];
-    let best = 0;
-    for(const shift of [delta, -delta]){
-      if(at[shift] !== undefined && at[shift] > at[best] + CC_REFINE_MARGIN) best = shift;
-    }
-    const cal = parseInt((cc.settings && cc.settings.calibrations &&
-                          cc.settings.calibrations[String(m)]) || 4096);
-    const step = ((base[m] + best) % cal + cal) % cal;
-    if(best !== 0){
-      tuned[String(m)] = { [String(idx)]: step };
-      moved++;
-    }
-    settled.push({ module: m, step: step });
-  }
-
-  if(moved){
-    const write = await ccPost('/apply_tuning', { tuned: tuned });
-    if(write.ok) ccNoteWritten(tuned);
-    else moved = 0;
-  }
-  // Leave the display on what was chosen rather than on the last thing tried.
-  await ccMoveTo(settled, idx);
-  return moved;
 }
 
 // Keep our copy of settings in step with what was just written, so the next
@@ -1546,8 +1436,16 @@ function ccScoreReads(idx, reads, positions){
     const from = (pos.active !== undefined && pos.active !== null)
       ? parseInt(pos.active) : Math.floor(idx * cal / flaps);
 
-    // Reading the character ahead means the module overshot: fewer steps.
-    let to = Math.round(from - err * (cal / flaps));
+    // The letter says which way, not how far. A module showing the wrong
+    // flap is somewhere past the boundary — it might be five steps over, it
+    // might be forty — so moving it a whole flap overshoots almost every
+    // time, and lands it a whole flap out the other way.
+    //
+    // So: nudge, look again, nudge again. That is what Auto Fine-Tune does
+    // by hand at 25 steps a click, and it is the only part of this that ever
+    // worked on this display. Reading the character ahead means the module
+    // overshot, so it goes back.
+    let to = Math.round(from - Math.sign(err) * ccStepSize());
     to = Math.max(0, Math.min(cal - 1, to));
 
     if(!cc.results[m]) cc.results[m] = {};
@@ -1808,16 +1706,19 @@ async function ccApply(){
 // correction worked.
 async function ccRecheck(){
   const btn = document.getElementById('ccRecheckBtn');
+  const auto = document.getElementById('ccAuto');
+  const was = auto.checked;
   btn.disabled = true;
+  auto.checked = false;              // the same walk, correcting nothing
   cc.abort = false;
-  cc.pass++;
-  ccShow('sweep');
-  await ccSweepPass();
-  cc.history.push(ccTotalWrong());
-  cc.outcome = ccTotalWrong() === 0 ? 'done' : 'exhausted';
-  ccRenderReview();
-  ccShow('review');
-  btn.disabled = false;
+  cc.results = {};
+  cc.unread = {};
+  try {
+    await ccRunUntilClean();
+  } finally {
+    auto.checked = was;
+    btn.disabled = false;
+  }
 }
 
 function ccRestart(){

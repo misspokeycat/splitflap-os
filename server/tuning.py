@@ -46,8 +46,14 @@ def build_tuning_adjust_commands(
 # so much. These bound one gap between neighbouring flaps as a fraction of the
 # nominal spacing; outside them the sequence is not compensating for anything,
 # it has a flap in the wrong place.
-STEP_GAP_MIN = 0.4
-STEP_GAP_MAX = 1.6
+#
+# Wide enough for a couple of 25-step nudges at one flap, which is how a
+# correction is actually made. Past that the deviation approaches a whole
+# flap, at which point the flaps would be sitting on top of each other — and
+# what the module really has is a home offset, which is one number for the
+# whole reel rather than a correction to one position on it.
+STEP_GAP_MIN = 0.2
+STEP_GAP_MAX = 1.8
 
 
 def effective_steps(tuned, calibration, flap_count):

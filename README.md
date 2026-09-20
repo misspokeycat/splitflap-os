@@ -120,27 +120,36 @@ correction derived from it.
 
 ### How a correction is made
 
-A flap at a time, not a display at a time. One read of every position comes
-first, because the reference images are built out of it; after that each
-position is corrected, the corrected modules are moved to where they were
-just told to be, and that position is read again before anything else
-happens. A flap that will not come right is named on the spot rather than
-turning up as a number at the end of a second full sweep.
+The way Auto Fine-Tune does it by hand, one flap at a time, during the sweep
+rather than after it.
 
-Identifying which flap a module shows can only ever correct by a whole flap —
-about 64 steps on a 64-flap reel. A module twenty steps out is on the right
-flap, reports no error, and still looks unseated. **Fine adjustment** covers
-that: each flap is also nudged by a few steps either way and whichever sits
-closest to the rest of the display is kept. It needs no model of how steps
-become pixels, because the reference image already is what that flap looks
-like across the display. It costs three photographs per flap instead of one.
+At each position the display is photographed once. The reference for that
+flap is the middle of what the whole display is showing right now, so it is
+ready the moment the frame is — nothing has to wait for the rest of the
+sweep. Any module not on that flap is corrected, moved, and that position is
+photographed again, before the sweep moves on. A flap that will not come
+right is named on the spot.
+
+**The flap that is showing says which way to move, not how far.** A module on
+the wrong flap is somewhere past the boundary — it might be five steps over,
+it might be forty — so it is nudged 25 steps and looked at again, the same
+figure Auto Fine-Tune applies per click. Moving it a whole flap overshoots
+almost every time and lands it a flap out the other way.
 
 Every write is checked against the reel before it lands. A reel turns one
 way, so a module's positions have to climb round it in order and come back to
 the start after exactly one revolution; nothing mechanical moves a flap past
-its neighbour. A write that would break that order is refused with a 409 —
-it is a misread rather than a correction. Only problems a write *introduces*
-are refused, so a module already carrying a bad sequence stays fixable.
+its neighbour. The bounds allow a couple of nudges at one flap and refuse
+anything approaching a whole one — at that point the flaps would be sitting
+on each other, and what the module has is a home offset, which is one number
+for the whole reel rather than a correction to one position on it. A write
+that breaks the order comes back 409. Only problems a write *introduces* are
+refused, so a module already carrying a bad sequence stays fixable.
+
+Corrections are whole flaps nowhere. Finer-than-a-nudge adjustment was tried
+and dropped: on a capture sweeping all 63 flaps, a module's sub-flap lean
+agreed with its own average only 54% of the time against a 50% coin flip, so
+there was nothing there to correct toward.
 
 To turn a session into a regression test, unzip it into
 `tests/fixtures/captures/<name>/`. `tests/js/test_captures.js` picks up any
