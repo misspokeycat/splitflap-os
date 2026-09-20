@@ -27,6 +27,7 @@ EXPECTED_ROUTES = [
     ("/app_library/uninstall", "apps.app_library_uninstall", "POST"),
     ("/app_playlists", "playlists.app_playlists", "GET,POST"),
     ("/app_playlists/<path:name>", "playlists.delete_app_playlist", "DELETE"),
+    ("/apply_tuning", "tuning.apply_tuning", "POST"),
     ("/apply_update", "system.apply_update", "POST"),
     ("/assign_id", "tuning.assign_id", "POST"),
     ("/auto_tune", "tuning.auto_tune_route", "POST"),

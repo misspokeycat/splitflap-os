@@ -291,6 +291,8 @@ Other endpoints:
 | `GET /installed_apps` | the app list and their settings schema |
 | `POST /notify` | temporary interrupt; needs a bearer token from `notify_sources` |
 | `POST /module_audit` | compare module EEPROM against settings.json; writes nothing |
+| `POST /apply_tuning` | `{"tuned": {"3": {"10": 640}}}` — write just these tuned positions |
+| `POST /restore_settings` | push stored offsets, calibrations and tuning back onto the modules named in the payload |
 
 ### EEPROM drift
 
@@ -305,6 +307,26 @@ the module's calibration cannot be real. Values that fail that test are
 dropped on sync rather than written into settings.json, and a module reporting
 an unusable calibration keeps the one already stored — otherwise a bad reading
 would be written back to the module on the next restore.
+
+### Writing tuning back
+
+Two endpoints, and the difference matters because the bus is 9600 baud and
+every command carries a fixed delay — call it thirty milliseconds each.
+
+`POST /restore_settings` makes a module match settings.json exactly: it
+rewrites the offset and calibration, erases the tuning, and writes all of it
+back. That is what restoring a backup needs. It is roughly forty commands per
+module, so a fully tuned display is the better part of a minute, and it now
+touches only the modules named in the payload rather than every module on the
+display.
+
+`POST /apply_tuning` writes one command per position and nothing else, for
+correcting a few positions without rewriting the rest. This is what Camera
+Tune uses: fifty-seven corrections is fifty-seven commands, about two seconds,
+and it does not grow with how much tuning the display already carries.
+Everything is validated before anything is written — a half-applied
+correction set is worse than a rejected one, because nothing records which
+half landed.
 
 `POST /module_audit` reports the state of each module without changing
 anything:

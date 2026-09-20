@@ -327,18 +327,83 @@ def restore_settings():
         if key in data and not isinstance(data[key], dict):
             return jsonify(status="error",
                            message=f"'{key}' must be an object"), 400
-    if 'offsets'      in data: settings['offsets'].update(data['offsets'])
-    if 'calibrations' in data: settings['calibrations'].update(data['calibrations'])
-    if 'tuned_chars'  in data: settings['tuned_chars'].update(data['tuned_chars'])
+
+    # Only the modules the caller actually sent. Restoring a whole backup
+    # names all of them and still writes all of them; restoring three does
+    # not rewrite the EEPROM of the other forty-two, which is what it used
+    # to do — at roughly thirty milliseconds a command on a 9600 baud bus.
+    touched = set()
+    for key in ('offsets', 'calibrations', 'tuned_chars'):
+        if key in data:
+            settings[key].update(data[key])
+            for mod_id in data[key]:
+                if _module_id(mod_id) is not None:
+                    touched.add(_module_id(mod_id))
     save_settings(settings)
+
     hw = False
-    if state.ser:
+    if state.ser and touched:
         hw = True
-        for i in range(get_module_count()):
+        for i in sorted(touched):
             restore_module_settings(i)
             logging.info(f"Restored m{i:02d}")
     return jsonify(status="success", hardware_updated=hw,
-                   modules_updated=get_module_count())
+                   modules_updated=len(touched))
+
+
+@bp.route('/apply_tuning', methods=['POST'])
+def apply_tuning():
+    """Write only the tuned positions that changed.
+
+    /restore_settings exists to make a module match our stored settings
+    exactly, so it erases that module's tuning and writes all of it back.
+    That is the right shape for restoring a backup and the wrong shape for
+    correcting a handful of positions: a fully tuned display is some
+    seventeen hundred commands, the better part of a minute of bus time, and
+    an EEPROM write for every position including the ones already correct.
+
+    This writes one command per correction. Fifty-seven corrections is
+    fifty-seven commands, and it does not grow with how much tuning the
+    display already carries.
+    """
+    data = request.json or {}
+    tuned = data.get('tuned')
+    if not isinstance(tuned, dict):
+        return jsonify(error="'tuned' must be an object"), 400
+
+    # Validate everything before writing anything: a half-applied correction
+    # set is worse than a rejected one, because nothing says which half.
+    writes = []
+    for raw_id, pairs in tuned.items():
+        mod_id = _module_id(raw_id)
+        if mod_id is None:
+            return jsonify(error=f"Unknown module {raw_id!r}"), 400
+        if not isinstance(pairs, dict):
+            return jsonify(error=f"Module {mod_id} must map index to step"), 400
+        key = str(mod_id)
+        cal = int(settings['calibrations'].get(key, 4096))
+        flap_count = get_module_flap_count(mod_id)
+        for raw_index, raw_step in pairs.items():
+            index = _as_int(raw_index, None)
+            step = _as_int(raw_step, None)
+            if index is None or not 0 <= index < flap_count:
+                return jsonify(
+                    error=f"Module {mod_id}: index must be between 0 and {flap_count - 1}"), 400
+            # A step is a position within one revolution; anything else is a
+            # position the module cannot reach.
+            if step is None or not 0 <= step < cal:
+                return jsonify(
+                    error=f"Module {mod_id} index {index}: step must be between 0 and {cal - 1}"), 400
+            writes.append((mod_id, index, step))
+
+    for mod_id, index, step in writes:
+        send_raw(f"m{mod_id:02d}w{index}:{step}")
+        settings['tuned_chars'].setdefault(str(mod_id), {})[str(index)] = step
+    save_settings(settings)
+
+    return jsonify(status="success", writes=len(writes),
+                   modules=len({m for m, _, _ in writes}),
+                   hardware_updated=bool(state.ser) and bool(writes))
 
 # ── Saved Playlists ──────────────────────────────────────────
 

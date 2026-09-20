@@ -120,10 +120,26 @@ class RestoreTests(SplitflapTestCase):
         self.http.post("/restore_settings", json=backup)
         self.assertEqual(settings['offsets']['0'], 1111)
 
-    def test_the_module_count_reported_is_the_real_one(self):
+    def test_a_whole_backup_still_covers_the_whole_grid(self):
+        # The count must come from the payload, not from a hardcoded 45.
         self.set_grid(2, 5)
-        body = self.http.post("/restore_settings", json={"offsets": {}}).get_json()
+        backup = self.http.get("/backup_settings").get_json()
+        backup["offsets"] = {str(i): 2832 for i in range(10)}
+        body = self.http.post("/restore_settings", json=backup).get_json()
         self.assertEqual(body["modules_updated"], 10)
+
+    def test_restoring_some_modules_leaves_the_rest_alone(self):
+        # Rewriting a module's EEPROM is not free and is not safe: it happens
+        # while the motors are drawing. Restoring three modules used to push
+        # all forty-five, which is both slow and gratuitous wear.
+        body = self.http.post("/restore_settings",
+                              json={"offsets": {"2": 2800, "7": 2900}}).get_json()
+        self.assertEqual(body["modules_updated"], 2)
+
+    def test_restoring_nothing_writes_nothing(self):
+        body = self.http.post("/restore_settings", json={"offsets": {}}).get_json()
+        self.assertEqual(body["modules_updated"], 0)
+        self.assertFalse(body["hardware_updated"])
 
     def test_a_malformed_backup_is_rejected_not_a_500(self):
         for payload in ({"offsets": "not-a-dict"},
@@ -226,6 +242,84 @@ class TunedStepRangeTests(SplitflapTestCase):
             "action": "save", "id": 0, "index": 3, "step": 4095})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(settings['tuned_chars']['0']['3'], 4095)
+
+
+class ApplyTuningTests(SplitflapTestCase):
+    """Writing a handful of corrections without rewriting the display.
+
+    The bus is 9600 baud and every command carries a fixed delay, so what
+    matters here is not that the right values arrive but that nothing else
+    does. Restoring a backup writes each module's whole tuning back; a camera
+    pass correcting fifty-seven positions must write fifty-seven commands.
+    """
+
+    def setUp(self):
+        super().setUp()
+        app.app.config["TESTING"] = False
+        self.http = app.app.test_client()
+        self.set_grid(3, 15)
+
+    def apply(self, tuned):
+        return self.http.post("/apply_tuning", json={"tuned": tuned})
+
+    def test_one_command_per_correction_and_nothing_else(self):
+        body = self.apply({"3": {"10": 640, "11": 704}, "7": {"2": 128}}).get_json()
+        self.assertEqual(body["writes"], 3)
+        self.assertEqual(body["modules"], 2)
+        self.assertEqual(self.sent, ["m03w10:640", "m03w11:704", "m07w2:128"])
+
+    def test_the_values_are_stored(self):
+        self.apply({"3": {"10": 640}})
+        self.assertEqual(settings['tuned_chars']['3']['10'], 640)
+
+    def test_tuning_already_stored_is_left_in_place(self):
+        # The correction is a delta. Positions that were already right are
+        # neither rewritten to EEPROM nor dropped from settings.
+        settings['tuned_chars']['3'] = {"5": 320}
+        self.apply({"3": {"10": 640}})
+        self.assertEqual(settings['tuned_chars']['3'], {"5": 320, "10": 640})
+        self.assertEqual(self.sent, ["m03w10:640"])
+
+    def test_a_correction_for_a_module_that_does_not_exist(self):
+        self.assertEqual(self.apply({"99": {"1": 10}}).status_code, 400)
+        self.assertEqual(self.sent, [])
+
+    def test_a_step_outside_one_revolution_is_rejected(self):
+        settings['calibrations']['3'] = 4096
+        for step in (-1, 4096, 65535, "banana"):
+            with self.subTest(step=step):
+                self.assertEqual(self.apply({"3": {"10": step}}).status_code, 400)
+        self.assertEqual(self.sent, [])
+
+    def test_an_index_past_the_end_of_the_reel_is_rejected(self):
+        self.assertEqual(self.apply({"3": {"64": 100}}).status_code, 400)
+        self.assertEqual(self.sent, [])
+
+    def test_nothing_is_written_when_any_correction_is_bad(self):
+        # A half-applied set is worse than a rejected one: the display ends
+        # up in a state nothing recorded.
+        response = self.apply({"3": {"10": 640}, "4": {"10": 99999}})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self.sent, [])
+        self.assertNotIn("10", settings['tuned_chars'].get('3', {}))
+
+    def test_the_payload_has_to_be_the_right_shape(self):
+        for payload in ({}, {"tuned": "no"}, {"tuned": {"3": "no"}}, {"tuned": {"3": [1, 2]}}):
+            with self.subTest(payload=payload):
+                self.assertEqual(
+                    self.http.post("/apply_tuning", json=payload).status_code, 400)
+
+    def test_an_empty_correction_set_is_not_an_error(self):
+        body = self.apply({}).get_json()
+        self.assertEqual(body["writes"], 0)
+        self.assertEqual(self.sent, [])
+
+    def test_a_high_module_on_a_large_grid(self):
+        # Defaults only cover modules 0-44; the calibration lookup must fall
+        # back rather than reject a module the grid really has.
+        self.set_grid(5, 15)
+        self.assertEqual(self.apply({"60": {"10": 640}}).status_code, 200)
+        self.assertEqual(self.sent, ["m60w10:640"])
 
 
 if __name__ == "__main__":

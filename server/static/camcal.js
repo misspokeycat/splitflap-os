@@ -8,9 +8,9 @@
 // exact correction for all 45 modules at once.
 //
 // A sweep writes nothing. Corrections are staged in the browser, reviewed,
-// and then written once in a single batch through /restore_settings.
-// Per-nudge EEPROM writes land while the motors are drawing hardest, which
-// is how modules lose their tuning.
+// and then written in one batch — one command per correction, and none for
+// the positions that were already right. Per-nudge EEPROM writes land while
+// the motors are drawing hardest, which is how modules lose their tuning.
 //
 // Writing a correction is not evidence it worked, so a pass can be repeated:
 // re-reading the display after a write is the only thing that proves the
@@ -1415,30 +1415,30 @@ function ccRenderSystemic(){
 }
 
 // Write once, at the end of a pass. restore_module_settings erases a module's
-// tuning and rewrites it, so each module must be sent its complete map —
-// corrections merged over what is already stored, not the corrections alone.
+// corrections and nothing else. /restore_settings makes a module match our
+// settings exactly, which means erasing its tuning and writing all of it
+// back — sensible for a backup, and far too much bus for a few positions.
 async function ccWriteCorrections(){
-  const stored = (cc.settings && cc.settings.tuned_chars) || {};
-  const merged = {};
+  const changed = {};
+  let count = 0;
   for(let m = 0; m < cc.count; m++){
     const s = ccModStats(m);
     if(!s.wrong) continue;
-    const key = String(m);
-    const map = Object.assign({}, stored[key] || {});
+    const pairs = {};
     for(const idx of Object.keys(s.byIdx)){
-      if(s.byIdx[idx].err !== 0) map[idx] = s.byIdx[idx].to;
+      if(s.byIdx[idx].err !== 0){ pairs[idx] = s.byIdx[idx].to; count++; }
     }
-    merged[key] = map;
+    changed[String(m)] = pairs;
   }
-  if(!Object.keys(merged).length) return true;
+  if(!count) return true;
 
   try {
-    const res  = await fetch('/restore_settings', {
+    const res  = await fetch('/apply_tuning', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tuned_chars: merged }),
+      body: JSON.stringify({ tuned: changed }),
     });
     const data = await res.json();
-    if(data.status !== 'success') throw new Error(data.message || 'Write rejected');
+    if(data.status !== 'success') throw new Error(data.error || data.message || 'Write rejected');
   } catch(err){
     showToast('Write failed: ' + err.message, 'error');
     return false;
@@ -1446,11 +1446,12 @@ async function ccWriteCorrections(){
 
   // What we just wrote is now what is stored, so the next pass measures
   // against it rather than against the tuning we started with.
-  for(const key of Object.keys(merged)){
-    if(!cc.settings.tuned_chars) cc.settings.tuned_chars = {};
-    cc.settings.tuned_chars[key] = merged[key];
+  if(!cc.settings.tuned_chars) cc.settings.tuned_chars = {};
+  for(const key of Object.keys(changed)){
+    cc.settings.tuned_chars[key] =
+      Object.assign({}, cc.settings.tuned_chars[key] || {}, changed[key]);
   }
-  await ccAudit(Object.keys(merged).map(Number));
+  await ccAudit(Object.keys(changed).map(Number));
   return true;
 }
 
