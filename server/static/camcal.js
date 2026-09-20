@@ -66,7 +66,191 @@ const cc = {
   previewId:   null,
   frameCanvas: null,
   workCanvas:  null,
+  dump:        null,   // {session, manifest} while a run is being recorded
 };
+
+// ── Capture dump ───────────────────────────────────────────
+
+// Everything the run saw, kept so a misread can be looked at rather than
+// guessed at, and so a real capture can become a test fixture.
+//
+// Collected in the browser and handed over as one zip at the end. Nothing is
+// sent to the Pi: a sweep is a few thousand PNGs, and writing those to the SD
+// card the display boots from — while the motors are drawing, which is when
+// this hardware loses writes — is the thing the rest of this file is built to
+// avoid.
+
+const CC_DUMP_MAX_BYTES = 120 * 1024 * 1024;
+
+function ccDumpOn(){
+  const el = document.getElementById('ccDump');
+  return !!(el && el.checked);
+}
+
+function ccDumpStart(){
+  if(!ccDumpOn()){ cc.dump = null; return; }
+  // Registration opens the session before the sweep does, and its two frames
+  // are the ones corner detection is tested against — don't start over.
+  if(cc.dump) return;
+  const now = new Date();
+  const pad = n => String(n).padStart(2, '0');
+  cc.dump = {
+    session: now.getFullYear() + pad(now.getMonth() + 1) + pad(now.getDate()) + '-' +
+             pad(now.getHours()) + pad(now.getMinutes()) + pad(now.getSeconds()),
+    bytes:    0,
+    files:    [],
+    manifest: {
+      created:   now.toISOString(),
+      grid:      { rows: cc.rows, cols: cc.cols, count: cc.count },
+      cell:      { w: CC_OCR_W, h: CC_OCR_H, inset: CC_CELL_INSET },
+      motion:    { w: CC_MOTION_W, h: CC_MOTION_H, frameWidth: CC_MOTION_MAX_W },
+      charMap:   getCharMap(0),
+      positions: [],
+    },
+  };
+}
+
+function ccPngOf(imageData){
+  const b64 = ccCellToCanvas(imageData).toDataURL('image/png').split(',')[1];
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for(let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+function ccImageFromGray(gray, w, h){
+  const img = new ImageData(w, h);
+  for(let i = 0; i < gray.length; i++){
+    img.data[i*4] = img.data[i*4+1] = img.data[i*4+2] = gray[i];
+    img.data[i*4+3] = 255;
+  }
+  return img;
+}
+
+function ccDumpAdd(name, bytes){
+  if(!cc.dump) return;
+  if(cc.dump.bytes + bytes.length > CC_DUMP_MAX_BYTES){
+    showToast('Capture dump stopped — ' + ccBytes(CC_DUMP_MAX_BYTES) + ' collected', 'warn');
+    cc.dump.full = true;
+    return;
+  }
+  cc.dump.files.push({ name: name, bytes: bytes });
+  cc.dump.bytes += bytes.length;
+}
+
+// Finish the manifest and hand the whole session over as one file.
+function ccDumpFinish(){
+  if(!cc.dump || !cc.dump.files.length) return;
+  cc.dump.manifest.corners    = cc.corners;
+  cc.dump.manifest.homography = cc.H;
+  cc.dump.manifest.threshold  = cc.threshold;
+  cc.dump.manifest.history    = cc.history;
+  cc.dump.manifest.outcome    = cc.outcome;
+  cc.dump.manifest.video      = cc.video
+    ? { width: cc.video.videoWidth, height: cc.video.videoHeight } : null;
+
+  const json = new TextEncoder().encode(JSON.stringify(cc.dump.manifest, null, 2));
+  cc.dump.files.push({ name: 'manifest.json', bytes: json });
+  cc.dump.bytes += json.length;
+  ccRenderDump();
+}
+
+function ccRenderDump(){
+  const el = document.getElementById('ccDumpPanel');
+  if(!el) return;
+  if(!cc.dump || !cc.dump.files.length){ el.style.display = 'none'; return; }
+  el.style.display = 'block';
+  el.innerHTML =
+    '<strong>Captured frames</strong> — ' + cc.dump.files.length + ' files, ' +
+    ccBytes(cc.dump.bytes) +
+    (cc.dump.full ? ' <span style="color:var(--orange)">(stopped at the size limit)</span>' : '') +
+    '<div class="cc-capture-row"><span>' + cc.dump.session + '.zip</span>' +
+    '<button class="btn btn-secondary btn-sm" onclick="ccDownloadDump()">Download</button></div>' +
+    '<div style="color:#999;margin-top:6px">Unzip into <code>tests/fixtures/captures/</code> to ' +
+    'turn this run into a regression test.</div>';
+}
+
+function ccDownloadDump(){
+  if(!cc.dump || !cc.dump.files.length) return;
+  const blob = new Blob([ccZipBytes(cc.dump.files)], { type: 'application/zip' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = cc.dump.session + '.zip';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+
+// ── Zip ────────────────────────────────────────────────────
+
+// Stored, not deflated: PNGs are already compressed, so the only thing
+// deflate would add here is time. Pure bytes in, bytes out — no Blob, no DOM —
+// so the output can be checked against a real zip reader in the tests.
+
+let CC_CRC_TABLE = null;
+
+function ccCrc32(bytes){
+  if(!CC_CRC_TABLE){
+    CC_CRC_TABLE = new Int32Array(256);
+    for(let n = 0; n < 256; n++){
+      let c = n;
+      for(let k = 0; k < 8; k++) c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+      CC_CRC_TABLE[n] = c;
+    }
+  }
+  let c = -1;
+  for(let i = 0; i < bytes.length; i++) c = CC_CRC_TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ -1) >>> 0;
+}
+
+function ccZipBytes(files){
+  const enc = new TextEncoder();
+  const entries = files.map(f => ({
+    name:  enc.encode(f.name),
+    bytes: f.bytes,
+    crc:   ccCrc32(f.bytes),
+  }));
+
+  let size = 22;    // end-of-central-directory
+  for(const e of entries) size += 30 + e.name.length + e.bytes.length + 46 + e.name.length;
+
+  const out = new Uint8Array(size);
+  const view = new DataView(out.buffer);
+  let pos = 0;
+  const u16 = v => { view.setUint16(pos, v, true); pos += 2; };
+  const u32 = v => { view.setUint32(pos, v, true); pos += 4; };
+  const raw = b => { out.set(b, pos); pos += b.length; };
+
+  for(const e of entries){
+    e.offset = pos;
+    u32(0x04034b50); u16(20); u16(0); u16(0);     // signature, version, flags, stored
+    u16(0); u16(0);                                // dos time and date, left at zero
+    u32(e.crc); u32(e.bytes.length); u32(e.bytes.length);
+    u16(e.name.length); u16(0);
+    raw(e.name); raw(e.bytes);
+  }
+
+  const dirStart = pos;
+  for(const e of entries){
+    u32(0x02014b50); u16(20); u16(20); u16(0); u16(0);
+    u16(0); u16(0);
+    u32(e.crc); u32(e.bytes.length); u32(e.bytes.length);
+    u16(e.name.length); u16(0); u16(0);
+    u16(0); u16(0); u32(0);
+    u32(e.offset);
+    raw(e.name);
+  }
+
+  // Measured before the end record is written: the writers advance `pos`, so
+  // reading it inside the call below would count this record's own bytes.
+  const dirSize = pos - dirStart;
+  u32(0x06054b50); u16(0); u16(0);
+  u16(entries.length); u16(entries.length);
+  u32(dirSize); u32(dirStart); u16(0);
+  return out;
+}
 
 // ── Screens ────────────────────────────────────────────────
 
@@ -77,7 +261,9 @@ const CC_STAGE_SCREENS = ['register', 'preview', 'homing', 'sweep', 'review'];
 function openCamCal(){
   document.getElementById('camCalOverlay').style.display = 'flex';
   ccShow('start');
+  cc.dump = null;
   ccResetRun();
+  ccRenderDump();
 }
 
 function closeCamCal(){
@@ -347,13 +533,16 @@ async function ccAutoRegister(){
 
   // The corners may not have finished turning when the loop dispatched the
   // page, so look a few times before giving up.
-  let found = null;
+  let found = null, lastAfter = null, frameW = CC_MOTION_MAX_W, frameH = 0;
   for(let attempt = 0; attempt < 4 && !found; attempt++){
     const frame = ccFrame(CC_MOTION_MAX_W);
     const after = ccGrayOf(frame.img);
     const diff  = new Uint8Array(after.length);
     for(let i = 0; i < after.length; i++) diff[i] = Math.abs(after[i] - before[i]);
     const blobs = ccFindBlobs(diff, frame.img.width, frame.img.height);
+    lastAfter = after;
+    frameW = frame.img.width;
+    frameH = frame.img.height;
     if(blobs.length >= 4) found = { blobs: blobs, scale: frame.scale };
     else await ccSleep(600);
   }
@@ -387,6 +576,19 @@ async function ccAutoRegister(){
   ccRegHint('Grid found from the four corner modules. Check the cells line up, and drag ' +
             'any corner to adjust.');
   btn.disabled = false;
+
+  // The pair that produced the grid is the fixture corner detection is worth
+  // testing against, so keep it even though the sweep has not started.
+  if(ccDumpOn()){
+    if(!cc.dump) ccDumpStart();
+    cc.dump.manifest.registration = {
+      frameWidth: frameW, frameHeight: frameH, scale: found.scale,
+      blobs: found.blobs, chosen: dst, centres: ccCornerCentres(),
+      modules: ccCornerModules(), homography: H,
+    };
+    ccDumpAdd('reg_before.png', ccPngOf(ccImageFromGray(before, frameW, frameH)));
+    ccDumpAdd('reg_after.png',  ccPngOf(ccImageFromGray(lastAfter, frameW, frameH)));
+  }
 }
 
 // ── Blob finding ───────────────────────────────────────────
@@ -791,6 +993,7 @@ async function ccBegin(){
   if(!cc.sweep.length){ showToast('No readable flap positions in the char map', 'error'); return; }
 
   ccResetRun();
+  ccDumpStart();
   ccShow('homing');
   const status = document.getElementById('ccHomingStatus');
 
@@ -872,6 +1075,7 @@ async function ccRunUntilClean(){
   }
 
   cc.running = false;
+  ccDumpFinish();
   ccRenderReview();
   ccShow('review');
 }
@@ -927,10 +1131,46 @@ async function ccSweepPass(){
     const data  = await res.json();
     ccScoreReads(idx, reads, data.positions || {});
     ccRenderSweepGrid();
+
+    if(cc.dump){
+      note.textContent = 'Saving frames…';
+      ccDumpPosition(idx, cells);
+    }
   }
 
   bar.style.width = '100%';
   cc.running = false;
+}
+
+// One position's crops, each named for the pass, position and module that
+// produced it, alongside what was expected of it and what was made of it.
+function ccDumpPosition(idx, cells){
+  const modules = [];
+  for(let m = 0; m < cc.count; m++){
+    const name = 'p' + cc.pass + '_i' + String(idx).padStart(2, '0') +
+                 '_m' + String(m).padStart(2, '0');
+    ccDumpAdd(name + '.png', ccPngOf(cells[m]));
+    const scored = (cc.results[m] || {})[idx];
+    const live   = cc.live[m] || {};
+    modules.push({
+      id:       m,
+      file:     name + '.png',
+      expected: getCharMap(m)[idx],
+      read:     scored ? scored.read : (live.char || null),
+      conf:     scored ? scored.conf : null,
+      err:      scored ? scored.err  : null,
+      from:     scored ? scored.from : null,
+      to:       scored ? scored.to   : null,
+      // Recorded per reading rather than looked up later: these are what the
+      // correction was computed from, and settings.json can change after.
+      cal:      parseInt((cc.settings && cc.settings.calibrations &&
+                          cc.settings.calibrations[String(m)]) || 4096),
+      flaps:    getFlapCount(m),
+    });
+  }
+  cc.dump.manifest.positions.push({
+    pass: cc.pass, index: idx, char: getCharMap(0)[idx], modules: modules,
+  });
 }
 
 // Turn one frame's reads into staged corrections.
@@ -1195,6 +1435,15 @@ async function ccRecheck(){
 }
 
 function ccRestart(){
+  cc.dump = null;
   ccResetRun();
   ccShow('preview');
+}
+
+// ── Sizes ──────────────────────────────────────────────────
+
+function ccBytes(n){
+  if(n < 1024) return n + ' B';
+  if(n < 1024 * 1024) return (n / 1024).toFixed(0) + ' KB';
+  return (n / 1024 / 1024).toFixed(1) + ' MB';
 }

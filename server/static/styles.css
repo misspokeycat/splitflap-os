@@ -366,6 +366,9 @@ input:checked+.slider:before{transform:translateX(20px)}
 .cc-check{display:flex;gap:8px;align-items:flex-start;color:#bbb;font-size:.85rem;line-height:1.5;
   margin:12px 0;cursor:pointer}
 .cc-check input{width:auto;margin:2px 0 0}
+.cc-capture-row{display:flex;justify-content:space-between;align-items:center;gap:10px;
+  flex-wrap:wrap;margin-top:8px;padding-top:8px;border-top:1px solid #2a2a2a;font-size:.8rem}
+.cc-capture-row a{text-decoration:none}
 .cc-hint{text-align:center;padding:10px;background:#111;border-radius:8px;font-size:.9rem;line-height:1.5}
 .cc-hint strong{color:#3ec8b5}
 .cc-grid{display:grid;grid-template-columns:repeat(15,1fr);gap:4px;margin:12px 0}

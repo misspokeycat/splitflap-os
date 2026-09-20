@@ -39,6 +39,14 @@ class JavaScriptTests(unittest.TestCase):
         self.assertNotIn("FAIL", output)
         self.assertIn("PASS", output)
 
+    def test_captured_frames_can_be_read_back(self):
+        # Always checks the PNG reader. Also replays the tuner's detection
+        # over any real captures dropped into tests/fixtures/captures — there
+        # are none in the repo, so that half is silent until one is added.
+        output = self.run_suite("test_captures.js")
+        self.assertNotIn("FAIL", output)
+        self.assertIn("PASS", output)
+
 
 if __name__ == "__main__":
     unittest.main()

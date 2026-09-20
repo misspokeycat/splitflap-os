@@ -797,6 +797,12 @@
         <span>Keep going until it reads clean — write the corrections, read everything back, and
         repeat while it is still improving.</span>
       </label>
+      <label class="cc-check">
+        <input type="checkbox" id="ccDump">
+        <span>Save every frame it reads, with what it made of them. Useful for working out why a
+        module keeps misreading — and for building test fixtures. Collected in this browser and
+        offered as a zip at the end; nothing is written to the Pi.</span>
+      </label>
       <div style="margin:10px 0 4px">
         <label class="field-label">Pass limit</label>
         <input type="number" id="ccMaxPasses" value="3" min="1" max="4">
@@ -901,6 +907,7 @@
       </div>
       <div id="ccSystemic" class="cc-note" style="display:none"></div>
       <div id="ccAudit" class="cc-note" style="display:none"></div>
+      <div id="ccDumpPanel" class="cc-note" style="display:none"></div>
       <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap">
         <button class="btn btn-success" style="flex:1" id="ccApplyBtn" onclick="ccApply()">Apply Corrections</button>
         <button class="btn btn-warning btn-sm" id="ccRecheckBtn" onclick="ccRecheck()">Re-check</button>

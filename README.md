@@ -100,6 +100,29 @@ SPLITFLAP_GATEWAY_PASSWORD=           # optional
 ```
 
 > Note: this MQTT connection (display transport) is independent of the existing **MQTT / Home Assistant** integration (state publishing & control), which continues to use its own broker settings.
+
+## Camera Tune captures
+
+Camera Tune can save every frame it reads, with what it made of each one. Tick
+**Save every frame it reads** before starting a run, and at the end the review
+screen offers the whole session as a zip.
+
+It is collected in the browser and never sent to the Pi: a sweep is a few
+thousand PNGs, and the card the display boots from is the one piece of storage
+here already known to drop writes — least of all while the motors are running.
+
+The archive holds one PNG per module per position, plus a `manifest.json`
+recording the grid geometry, the homography, and for every reading: the
+module, the expected character, what OCR returned, its confidence, the
+calibration it was measured against, and the step correction derived from it.
+
+To turn a session into a regression test, unzip it into
+`tests/fixtures/captures/<name>/`. `tests/js/test_captures.js` picks up any
+session found there and re-runs corner detection and the correction arithmetic
+over it. With no fixtures present that half stays quiet, so the suite passes on
+a fresh clone — the images are photographs of one particular display and too
+large to ship.
+
 ## Listening address (reverse proxy / HTTPS)
 
 By default the server listens on every interface on port 80, which is what the
