@@ -67,6 +67,64 @@ def read_config_file():
     return _read_stored_settings() or {}
 
 
+# Where the web server listens. The defaults are what this has always done —
+# every interface on port 80 — but behind a reverse proxy you want the opposite:
+# a high port so the service does not need to own 80, and usually 127.0.0.1 so
+# the only way in is through the proxy holding the certificate.
+DEFAULT_BIND_HOST = '0.0.0.0'
+DEFAULT_BIND_PORT = 80
+
+
+def _valid_port(value, source):
+    """A port the socket can actually take, or the default.
+
+    A bad value must not reach app.run(): the service would fail to start and
+    the display would go down with it, on a machine whose only UI is this
+    server. Refusing the value and saying so leaves the display reachable.
+    """
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        logging.error("%s is not a number (%r); using %d", source, value, DEFAULT_BIND_PORT)
+        return DEFAULT_BIND_PORT
+    if not 1 <= port <= 65535:
+        logging.error("%s is outside 1-65535 (%r); using %d", source, value, DEFAULT_BIND_PORT)
+        return DEFAULT_BIND_PORT
+    return port
+
+
+def get_bind_host(data=None):
+    """Resolve the bind address: env var > settings.json > every interface.
+
+    Pass an already-loaded settings dict as ``data`` to avoid re-reading
+    settings.json.
+    """
+    env_host = os.environ.get("SPLITFLAP_HOST")
+    if env_host and env_host.strip():
+        return env_host.strip()
+    if data is None:
+        data = read_config_file()
+    host = data.get("bind_host")
+    return host.strip() if isinstance(host, str) and host.strip() else DEFAULT_BIND_HOST
+
+
+def get_bind_port(data=None):
+    """Resolve the bind port: env var > settings.json > 80.
+
+    Pass an already-loaded settings dict as ``data`` to avoid re-reading
+    settings.json.
+    """
+    env_port = os.environ.get("SPLITFLAP_PORT")
+    if env_port and env_port.strip():
+        return _valid_port(env_port.strip(), "SPLITFLAP_PORT")
+    if data is None:
+        data = read_config_file()
+    port = data.get("bind_port")
+    if port is None or port == "":
+        return DEFAULT_BIND_PORT
+    return _valid_port(port, "bind_port in settings.json")
+
+
 def load_settings():
     # Detect system timezone
     sys_tz = 'US/Eastern'

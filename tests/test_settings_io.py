@@ -192,5 +192,74 @@ class DurabilityTests(SettingsFileTestCase):
         self.assertEqual(self.contents(self.config), REAL)
 
 
+class BindAddressTests(SettingsFileTestCase):
+    """Where the web server listens, for putting it behind a reverse proxy.
+
+    The port used to be written into the systemd unit, so terminating TLS in
+    front of it meant editing a file the installer rewrites. It is resolved
+    the same way as the serial port now: environment first, then
+    settings.json, then what it has always done.
+    """
+
+    def setUp(self):
+        super().setUp()
+        for name in ("SPLITFLAP_HOST", "SPLITFLAP_PORT"):
+            patch = mock.patch.dict(os.environ, {}, clear=False)
+            patch.start()
+            self.addCleanup(patch.stop)
+            os.environ.pop(name, None)
+
+    def write_settings(self, data):
+        self.write(self.config, json.dumps(data))
+
+    def test_the_default_is_what_it_has_always_been(self):
+        self.write_settings(REAL)
+        self.assertEqual(settings_module.get_bind_host(), "0.0.0.0")
+        self.assertEqual(settings_module.get_bind_port(), 80)
+
+    def test_settings_json_moves_the_server(self):
+        self.write_settings(dict(REAL, bind_host="127.0.0.1", bind_port=8080))
+        self.assertEqual(settings_module.get_bind_host(), "127.0.0.1")
+        self.assertEqual(settings_module.get_bind_port(), 8080)
+
+    def test_a_port_written_as_a_string_still_works(self):
+        # Hand-edited JSON, and the settings UI posts strings.
+        self.write_settings(dict(REAL, bind_port="8443"))
+        self.assertEqual(settings_module.get_bind_port(), 8443)
+
+    def test_the_environment_wins(self):
+        self.write_settings(dict(REAL, bind_host="127.0.0.1", bind_port=8080))
+        with mock.patch.dict(os.environ, {"SPLITFLAP_HOST": "0.0.0.0",
+                                          "SPLITFLAP_PORT": "9000"}):
+            self.assertEqual(settings_module.get_bind_host(), "0.0.0.0")
+            self.assertEqual(settings_module.get_bind_port(), 9000)
+
+    def test_an_empty_setting_is_not_a_setting(self):
+        self.write_settings(dict(REAL, bind_host="", bind_port=""))
+        self.assertEqual(settings_module.get_bind_host(), "0.0.0.0")
+        self.assertEqual(settings_module.get_bind_port(), 80)
+
+    def test_an_unusable_port_falls_back_rather_than_failing_to_start(self):
+        # app.run() would raise on any of these, and systemd would restart
+        # into the same failure — leaving no way to reach the display at all.
+        for bad in ("http", "0", "-1", "70000", "80.5"):
+            with self.subTest(port=bad):
+                self.write_settings(dict(REAL, bind_port=bad))
+                self.assertEqual(settings_module.get_bind_port(), 80)
+
+    def test_an_unusable_port_in_the_environment_falls_back_too(self):
+        self.write_settings(REAL)
+        with mock.patch.dict(os.environ, {"SPLITFLAP_PORT": "not-a-port"}):
+            self.assertEqual(settings_module.get_bind_port(), 80)
+
+    def test_an_already_loaded_settings_dict_is_not_re_read(self):
+        # open_connection threads its dict through the resolvers for this
+        # reason; these have to accept the same thing.
+        self.write_settings(dict(REAL, bind_port=8080))
+        data = {"bind_host": "10.0.0.5", "bind_port": 5000}
+        self.assertEqual(settings_module.get_bind_host(data), "10.0.0.5")
+        self.assertEqual(settings_module.get_bind_port(data), 5000)
+
+
 if __name__ == "__main__":
     unittest.main()

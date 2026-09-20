@@ -97,6 +97,57 @@ SPLITFLAP_GATEWAY_PASSWORD=           # optional
 ```
 
 > Note: this MQTT connection (display transport) is independent of the existing **MQTT / Home Assistant** integration (state publishing & control), which continues to use its own broker settings.
+## Listening address (reverse proxy / HTTPS)
+
+By default the server listens on every interface on port 80, which is what the
+Pi wants when it is the only thing on the box. To put it behind a reverse proxy
+that terminates TLS, move it off 80 — and usually onto the loopback, so the
+only way in is through the proxy:
+
+```json
+{
+  "bind_host": "127.0.0.1",
+  "bind_port": 8080
+}
+```
+
+in `server/settings.json`, or as environment variables, which take precedence:
+
+```
+SPLITFLAP_HOST=127.0.0.1
+SPLITFLAP_PORT=8080
+```
+
+Restart the service afterwards (`sudo systemctl restart splitflap`). A port the
+socket cannot take is logged and ignored rather than passed to the server —
+failing to start would leave the display with no UI at all.
+
+> Prefer `settings.json` over an `Environment=` line in the unit file:
+> `setup/install.sh` rewrites the unit on every update, and `settings.json` is
+> left alone.
+
+Nothing in the app generates absolute URLs, so no `X-Forwarded-*` handling is
+needed. A minimal nginx front end:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name splitflap.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/splitflap.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/splitflap.example.com/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+    }
+}
+```
+
+Serving the UI over HTTPS also makes the camera available to **Camera Tune** on
+the calibration page: browsers only expose `getUserMedia` to secure origins, so
+over plain HTTP it is blocked regardless of permissions.
+
 ## Universal Firmware
 
 Universal Firmware is an **optional alternative** to the original per-module
