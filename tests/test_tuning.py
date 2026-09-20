@@ -55,6 +55,10 @@ class StepSequenceTests(unittest.TestCase):
     have to climb and come back to the start after exactly one revolution.
     Nothing mechanical moves a flap past its neighbour, which makes this the
     one check that can tell a correction from a misread without a camera.
+
+    It is about order, not distance. How far apart two flaps sit says only
+    that the spacing is uneven, and uneven spacing is what a correction in
+    progress looks like.
     """
 
     CAL, FLAPS = 4096, 64
@@ -69,8 +73,8 @@ class StepSequenceTests(unittest.TestCase):
         self.assertEqual(self.problems(self.steps()), [])
 
     def test_the_wrap_from_the_last_flap_to_the_first_counts(self):
-        # The gap over the seam is a gap like any other; measuring it wrong
-        # would let the worst error of all through unnoticed.
+        # The seam is read like any other step from one flap to the next;
+        # skipping it would let the worst error of all through unnoticed.
         steps = self.steps()
         self.assertEqual(len(steps), self.FLAPS)
         steps[self.FLAPS - 1] = steps[0] + 10          # last flap past the first
@@ -95,12 +99,38 @@ class StepSequenceTests(unittest.TestCase):
             with self.subTest(nudge=nudge):
                 self.assertEqual(self.problems(self.steps(**{"10": 640 + nudge})), [])
 
-    def test_nudging_past_most_of_a_flap_is_caught(self):
-        # By here the flap would be sitting on its neighbour, and what the
-        # module actually has is a home offset rather than a bad position.
+    def test_nudging_past_a_neighbour_is_caught(self):
+        # Flap 9 sits at 576 and flap 11 at 704, so these land the other side
+        # of one of them.
         for nudge in (-75, 75):
             with self.subTest(nudge=nudge):
                 self.assertNotEqual(self.problems(self.steps(**{"10": 640 + nudge})), [])
+
+    def test_a_correction_bigger_than_a_nudge_is_allowed_while_it_stays_in_order(self):
+        # Positions are corrected in ascending order, so at the moment a flap
+        # is written its lower neighbours are already corrected and its higher
+        # ones are not. Judging that gap against nominal spacing refused every
+        # module needing more than about fifty steps, at every flap, while the
+        # sequence was in order the whole time.
+        for correction in (25, 50, 55, 63):
+            with self.subTest(correction=correction):
+                part_way = {str(i): (i * self.CAL) // self.FLAPS - correction
+                            for i in range(1, 11)}
+                self.assertEqual(self.problems(self.steps(**part_way)), [])
+
+    def test_the_seam_may_fall_anywhere(self):
+        # The one place the steps drop is the reel closing its loop, and a
+        # module whose home offset sits mid-flap puts it somewhere other than
+        # between the last flap and the first. That is not a fault.
+        steps = self.steps()
+        steps[0] = self.CAL - 25                       # flap 0 nudged back past zero
+        self.assertEqual(self.problems(steps), [])
+
+    def test_a_second_place_the_steps_drop_is_the_fault(self):
+        steps = self.steps()
+        steps[0] = self.CAL - 25
+        steps[30] = steps[29] - 1                      # and now flap 30 is behind flap 29
+        self.assertNotEqual(self.problems(steps), [])
 
     def test_a_flap_placed_past_its_neighbour_is_caught(self):
         self.assertNotEqual(self.problems(self.steps(**{"10": 705})), [])
@@ -109,17 +139,18 @@ class StepSequenceTests(unittest.TestCase):
         self.assertNotEqual(self.problems(self.steps(**{"10": 704})), [])
 
     def test_a_whole_module_shifted_together_is_fine(self):
-        # A home offset moves every flap by the same amount and changes no
-        # gap at all, so it must not look like a sequencing fault.
+        # A home offset moves every flap by the same amount and disturbs no
+        # order at all, so it must not look like a sequencing fault.
         shifted = [(s + 30) % self.CAL for s in self.steps()]
         self.assertEqual(self.problems(shifted), [])
 
-    def test_the_report_says_which_gap_and_how_wide(self):
+    def test_the_report_names_the_flaps_and_where_they_would_sit(self):
         found = step_sequence_problems(self.steps(**{"10": 705}), self.CAL)
-        self.assertTrue(found)
-        self.assertEqual(found[0]["next"], found[0]["index"] + 1)
-        self.assertEqual(found[0]["nominal"], 64.0)
-        self.assertIsInstance(found[0]["gap"], int)
+        at_ten = [p for p in found if p["index"] == 10]
+        self.assertTrue(at_ten)
+        self.assertEqual(at_ten[0]["next"], 11)
+        self.assertEqual(at_ten[0]["step"], 705)
+        self.assertEqual(at_ten[0]["next_step"], 704)
 
     def test_nonsense_inputs_do_not_raise(self):
         for steps, cal in (([], 4096), ([10], 4096), ([1, 2, 3], 0), ([1, 2, 3], -1)):

@@ -395,6 +395,10 @@ def apply_tuning():
     # order; nothing mechanical moves a flap past its neighbour. Only problems
     # this write introduces are refused, so a module whose stored sequence is
     # already broken stays fixable.
+    #
+    # Matched on the flap a descent starts at rather than on the whole entry:
+    # the steps either side of an already-broken seam change when a flap near
+    # it moves, and that is the same fault, not a new one.
     by_module = {}
     for mod_id, index, step in writes:
         by_module.setdefault(mod_id, {})[str(index)] = step
@@ -403,19 +407,25 @@ def apply_tuning():
         cal = int(settings['calibrations'].get(key, 4096))
         flap_count = get_module_flap_count(mod_id)
         stored = settings['tuned_chars'].get(key, {})
-        before = {tuple(sorted(p.items())) for p in
+        before = {p["index"] for p in
                   step_sequence_problems(effective_steps(stored, cal, flap_count), cal)}
         after = step_sequence_problems(
             effective_steps(dict(stored, **pairs), cal, flap_count), cal)
-        introduced = [p for p in after if tuple(sorted(p.items())) not in before]
+        introduced = [p for p in after if p["index"] not in before]
         if introduced:
-            first = introduced[0]
+            # Disorder shows up as two descents at once and only one of them
+            # is the flap this write moved. Name that one; the route knows
+            # which flaps it was asked to write and the check does not.
+            written = {int(i) for i in pairs}
+            first = next((p for p in introduced
+                          if p["index"] in written or p["next"] in written),
+                         introduced[0])
             return jsonify(
-                error=(f"Module {mod_id}: flap {first['index']} would sit "
-                       f"{first['gap']} steps from flap {first['next']}, where the "
-                       f"reel spaces them about {first['nominal']}. A flap cannot "
-                       f"move past its neighbour, so this is a misread rather than "
-                       f"a correction."),
+                error=(f"Module {mod_id}: flap {first['index']} would sit at step "
+                       f"{first['step']} with flap {first['next']} at "
+                       f"{first['next_step']}. A reel turns one way, so a flap "
+                       f"cannot move past its neighbour — this is a misread rather "
+                       f"than a correction."),
                 module=mod_id, problems=introduced), 409
 
     # With the server holding the positions there is nothing to put on a

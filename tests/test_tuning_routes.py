@@ -343,11 +343,23 @@ class ApplyTuningTests(SplitflapTestCase):
         self.assertEqual(settings['tuned_chars']['3']['10'], 645)
 
     def test_the_check_looks_at_the_whole_batch_together(self):
-        # Two writes that are each fine against what is stored but wrong
-        # against each other.
-        response = self.apply({"3": {"10": 640, "11": 641}})
+        # Each of these is in order against what is stored — 700 sits under
+        # flap 11 at 704, and 650 sits over flap 10 at 640 — and together
+        # they put flap 10 past flap 11.
+        response = self.apply({"3": {"10": 700, "11": 650}})
         self.assertEqual(response.status_code, 409)
         self.assertEqual(self.sent, [])
+
+    def test_a_correction_against_uncorrected_neighbours_is_allowed(self):
+        # The sweep corrects in ascending order, so flap 10 is written while
+        # flap 11 still holds its untuned position. That gap is wide by
+        # nominal spacing and perfectly in order, and refusing it stopped
+        # every module needing more than about fifty steps.
+        settings['tuned_chars']['3'] = {str(i): (i * 4096) // 64 - 60
+                                        for i in range(1, 10)}
+        response = self.apply({"3": {"10": 640 - 60}})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(settings['tuned_chars']['3']['10'], 580)
 
     def test_nothing_reaches_the_bus_when_the_server_holds_positions(self):
         # The next page sends the step itself, so writing EEPROM as well

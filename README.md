@@ -152,12 +152,14 @@ in the review and in the capture manifest.
 
 Every write is checked against the reel before it lands: a module's positions
 have to climb round in order and come back to the start after one revolution,
-and nothing mechanical moves a flap past its neighbour. A write that breaks
-that order comes back **409** naming the flap and how far out it is, and the
-run stops correcting that position. In practice it means the module needs its
-home offset moved rather than one position nudged. Only problems a write
-*introduces* are refused, so a module already carrying a bad sequence stays
-fixable.
+and nothing mechanical moves a flap past its neighbour. This is a check on
+order, not on spacing — a flap sitting an odd distance from its neighbour is
+what a half-finished correction looks like, and only a flap on the wrong side
+of one is impossible. A write that breaks the order comes back **409** naming
+the two flaps and where they would sit, and the run stops correcting that
+position; in practice it means the module needs its home offset moved rather
+than one position nudged. Only problems a write *introduces* are refused, so a
+module already carrying a bad sequence stays fixable.
 
 The review lists any flap that would not come right, with the modules still
 wrong and what each showed instead.

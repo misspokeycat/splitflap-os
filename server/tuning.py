@@ -42,16 +42,6 @@ def build_tuning_adjust_commands(
     )
 
 
-# Bounds on one gap between neighbouring flaps, as a fraction of the nominal
-# spacing. A tuned position may compensate for real mechanical slop, but only
-# by so much: wide enough here for a couple of nudges at one flap, and short
-# of the point where two flaps would sit on top of each other. Past that the
-# module has a home offset, which is one number for the whole reel rather
-# than a correction to one position on it.
-STEP_GAP_MIN = 0.2
-STEP_GAP_MAX = 1.8
-
-
 def effective_steps(tuned, calibration, flap_count):
     """Where each flap actually stops: the tuned step, or the plain division.
 
@@ -70,38 +60,40 @@ def effective_steps(tuned, calibration, flap_count):
     return steps
 
 
-def step_sequence_problems(steps, calibration, flap_count=None,
-                           gap_min=STEP_GAP_MIN, gap_max=STEP_GAP_MAX):
+def step_sequence_problems(steps, calibration):
     """Where a module's positions stop going round the drum in order.
 
-    A reel turns one way. Flap i+1 is one flap further round than flap i, so
-    the steps have to climb and come back to the start after exactly one
-    revolution. Nothing mechanical moves a flap past its neighbour, so a
-    position that breaks the order is not a correction — it is a misread that
-    got as far as being written.
+    A reel turns one way, so the steps climb and pass zero exactly once per
+    revolution: read round the cycle there is exactly one place where the
+    next step is not greater than this one. That is the seam, and it can fall
+    anywhere. A second such place is a flap put behind the one before it or
+    ahead of the one after it, which nothing mechanical does.
 
-    Returns a list of the gaps that are wrong, each naming the flap it starts
-    at. An empty list means the sequence is walkable.
+    Order, not distance. How far apart two flaps sit says only that the
+    spacing is uneven, and uneven spacing is also what a half-finished
+    correction looks like — positions are corrected in ascending order, so a
+    flap being written always sits against an uncorrected neighbour.
+
+    Returns the descents when there is more than one, each naming the flap it
+    starts at; which is the seam and which the fault cannot be told from the
+    steps alone, so both are reported. An empty list means the sequence walks.
     """
     calibration = int(calibration)
     count = len(steps)
-    if flap_count is None:
-        flap_count = count
     if count < 2 or calibration <= 0:
         return []
 
-    nominal = calibration / float(flap_count)
-    low, high = nominal * gap_min, nominal * gap_max
-    problems = []
+    descents = []
     for index in range(count):
-        # Modular, so the step from the last flap back to the first is
-        # measured the same way as every other.
-        gap = (int(steps[(index + 1) % count]) - int(steps[index])) % calibration
-        if gap < low or gap > high:
-            problems.append({
+        following = (index + 1) % count
+        step, next_step = int(steps[index]), int(steps[following])
+        # Not-greater, so two flaps on the same step counts: they cannot both
+        # be in the window at once either.
+        if next_step <= step:
+            descents.append({
                 "index": index,
-                "next": (index + 1) % count,
-                "gap": gap,
-                "nominal": round(nominal, 1),
+                "next": following,
+                "step": step,
+                "next_step": next_step,
             })
-    return problems
+    return descents if len(descents) > 1 else []
