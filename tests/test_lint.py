@@ -6,6 +6,7 @@ only fail when someone hits that route. pyflakes catches those in a second,
 so it runs as part of the suite rather than as something to remember.
 """
 
+import re
 import subprocess
 import sys
 import unittest
@@ -15,6 +16,13 @@ from support import SERVER_DIR
 # Lines carrying an explicit "# noqa" are intentional — app.py imports several
 # modules purely so that importing it boots the server.
 NOQA = "# noqa"
+
+# pyflakes reports "path:line:col: message". Splitting that on the first colon
+# takes the drive letter off a Windows path and calls it the filename, so the
+# noqa lookup below found nothing and every intentional import was reported —
+# the suite was red on Windows and green everywhere else. The path is
+# whatever precedes the first ":<line>:", which a drive letter is not.
+FINDING_RE = re.compile(r"^(?P<path>.+?):(?P<line>\d+):(?:\d+:)? ")
 
 
 class PyflakesTests(unittest.TestCase):
@@ -27,11 +35,14 @@ class PyflakesTests(unittest.TestCase):
         )
         out = []
         for line in result.stdout.splitlines():
-            path, _, rest = line.partition(":")
-            lineno = rest.split(":")[0]
+            match = FINDING_RE.match(line)
+            if match is None:
+                out.append(line)     # not a finding we can read: report it anyway
+                continue
             try:
-                source = open(path, encoding="utf-8").read().splitlines()[int(lineno) - 1]
-            except (ValueError, IndexError, OSError):
+                with open(match["path"], encoding="utf-8") as f:
+                    source = f.read().splitlines()[int(match["line"]) - 1]
+            except (IndexError, OSError):
                 source = ""
             if NOQA not in source:
                 out.append(line)
