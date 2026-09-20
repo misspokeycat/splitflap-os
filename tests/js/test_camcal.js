@@ -32,12 +32,12 @@ const cc = {
 const controls = { ccMinConf: { value: '60' }, ccMaxFlaps: { value: '2' } };
 
 const code = ['ccSolveH', 'ccGauss', 'ccApplyH', 'ccScaleH', 'ccCellQuad', 'ccScoreReads',
-              'ccCornerModules', 'ccCornerCentres', 'ccNextAction', 'ccOtsu', 'ccFindBlobs']
+              'ccCornerModules', 'ccCornerCentres', 'ccOtsu', 'ccFindBlobs']
   .map(grab).join('\n');
 const api = new Function(
   'cc', 'CC_CELL_INSET', 'document', 'getCharMap', 'getFlapCount',
   code + '; return {ccSolveH, ccApplyH, ccScaleH, ccCellQuad, ccScoreReads,' +
-         ' ccCornerModules, ccCornerCentres, ccNextAction, ccOtsu, ccFindBlobs};'
+         ' ccCornerModules, ccCornerCentres, ccOtsu, ccFindBlobs};'
 )(
   cc, 0.14,
   { getElementById: id => controls[id] },
@@ -250,19 +250,6 @@ const split = (dark, light) => {
 check('a dim scene splits correctly',   split(20, 90), true);
 check('a bright scene splits correctly', split(140, 230), true);
 check('a faint difference still splits', split(6, 30), true);
-
-// ── Deciding whether to write again ────────────────────────
-
-// Each pass that writes is another EEPROM write per corrected module, on
-// hardware that drops them. The loop has to stop on its own.
-check('a clean pass finishes',            api.ccNextAction([0], 3), 'done');
-check('a clean pass after writes finishes', api.ccNextAction([12, 3, 0], 3), 'done');
-check('the first pass with errors writes', api.ccNextAction([12], 3), 'apply');
-check('improving keeps going',            api.ccNextAction([12, 4], 3), 'apply');
-check('no improvement stops',             api.ccNextAction([12, 12], 3), 'stuck');
-check('getting worse stops',              api.ccNextAction([4, 9], 3), 'stuck');
-check('the pass limit stops it',          api.ccNextAction([12, 8, 5], 3), 'exhausted');
-check('a limit of one never writes twice', api.ccNextAction([12], 1), 'exhausted');
 
 console.log(failures ? `\n${failures} failure(s)` : '\nall checks passed');
 process.exit(failures ? 1 : 0);

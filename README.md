@@ -118,6 +118,30 @@ module, the expected flap, the flap it was matched to, how clearly that beat
 the runner-up, the calibration it was measured against, and the step
 correction derived from it.
 
+### How a correction is made
+
+A flap at a time, not a display at a time. One read of every position comes
+first, because the reference images are built out of it; after that each
+position is corrected, the corrected modules are moved to where they were
+just told to be, and that position is read again before anything else
+happens. A flap that will not come right is named on the spot rather than
+turning up as a number at the end of a second full sweep.
+
+Identifying which flap a module shows can only ever correct by a whole flap —
+about 64 steps on a 64-flap reel. A module twenty steps out is on the right
+flap, reports no error, and still looks unseated. **Fine adjustment** covers
+that: each flap is also nudged by a few steps either way and whichever sits
+closest to the rest of the display is kept. It needs no model of how steps
+become pixels, because the reference image already is what that flap looks
+like across the display. It costs three photographs per flap instead of one.
+
+Every write is checked against the reel before it lands. A reel turns one
+way, so a module's positions have to climb round it in order and come back to
+the start after exactly one revolution; nothing mechanical moves a flap past
+its neighbour. A write that would break that order is refused with a 409 —
+it is a misread rather than a correction. Only problems a write *introduces*
+are refused, so a module already carrying a bad sequence stays fixable.
+
 To turn a session into a regression test, unzip it into
 `tests/fixtures/captures/<name>/`. `tests/js/test_captures.js` picks up any
 session found there and re-runs corner detection and the correction arithmetic

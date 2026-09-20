@@ -40,3 +40,66 @@ def build_tuning_adjust_commands(
         f"m{module_id:02d}w{char_index}:{step_position}",
         f"m{module_id:02d}g{step_position}",
     )
+
+
+# A flap's tuned position may compensate for real mechanical slop, but only by
+# so much. These bound one gap between neighbouring flaps as a fraction of the
+# nominal spacing; outside them the sequence is not compensating for anything,
+# it has a flap in the wrong place.
+STEP_GAP_MIN = 0.4
+STEP_GAP_MAX = 1.6
+
+
+def effective_steps(tuned, calibration, flap_count):
+    """Where each flap actually stops: the tuned step, or the plain division.
+
+    The same value /tuning_status reports as "active" and the same one the
+    server sends when it holds the positions itself.
+    """
+    calibration = int(calibration)
+    flap_count = int(flap_count)
+    steps = []
+    for index in range(flap_count):
+        stored = (tuned or {}).get(str(index), (tuned or {}).get(index))
+        if stored is None:
+            steps.append((index * calibration) // flap_count)
+        else:
+            steps.append(int(stored))
+    return steps
+
+
+def step_sequence_problems(steps, calibration, flap_count=None,
+                           gap_min=STEP_GAP_MIN, gap_max=STEP_GAP_MAX):
+    """Where a module's positions stop going round the drum in order.
+
+    A reel turns one way. Flap i+1 is one flap further round than flap i, so
+    the steps have to climb and come back to the start after exactly one
+    revolution. Nothing mechanical moves a flap past its neighbour, so a
+    position that breaks the order is not a correction — it is a misread that
+    got as far as being written.
+
+    Returns a list of the gaps that are wrong, each naming the flap it starts
+    at. An empty list means the sequence is walkable.
+    """
+    calibration = int(calibration)
+    count = len(steps)
+    if flap_count is None:
+        flap_count = count
+    if count < 2 or calibration <= 0:
+        return []
+
+    nominal = calibration / float(flap_count)
+    low, high = nominal * gap_min, nominal * gap_max
+    problems = []
+    for index in range(count):
+        # Modular, so the step from the last flap back to the first is
+        # measured the same way as every other.
+        gap = (int(steps[(index + 1) % count]) - int(steps[index])) % calibration
+        if gap < low or gap > high:
+            problems.append({
+                "index": index,
+                "next": (index + 1) % count,
+                "gap": gap,
+                "nominal": round(nominal, 1),
+            })
+    return problems

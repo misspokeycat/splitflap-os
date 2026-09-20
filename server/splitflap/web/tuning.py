@@ -19,7 +19,8 @@ from splitflap.transport import (
 )
 from splitflap.display import send_to_display
 from splitflap.mqtt import mqtt_publish_discovery
-from tuning import build_tuning_adjust_commands
+from tuning import (build_tuning_adjust_commands, effective_steps,
+                    step_sequence_problems)
 
 bp = Blueprint("tuning", __name__)
 
@@ -395,6 +396,36 @@ def apply_tuning():
                 return jsonify(
                     error=f"Module {mod_id} index {index}: step must be between 0 and {cal - 1}"), 400
             writes.append((mod_id, index, step))
+
+    # A reel turns one way, so a module's positions have to climb round it in
+    # order. Nothing mechanical moves a flap past its neighbour — a position
+    # that breaks the order is a misread, and this is the last place to stop
+    # it before it is the display's idea of where that flap lives.
+    #
+    # Only problems this write introduces are refused. A module whose stored
+    # sequence is already broken has to stay fixable.
+    by_module = {}
+    for mod_id, index, step in writes:
+        by_module.setdefault(mod_id, {})[str(index)] = step
+    for mod_id, pairs in by_module.items():
+        key = str(mod_id)
+        cal = int(settings['calibrations'].get(key, 4096))
+        flap_count = get_module_flap_count(mod_id)
+        stored = settings['tuned_chars'].get(key, {})
+        before = {tuple(sorted(p.items())) for p in
+                  step_sequence_problems(effective_steps(stored, cal, flap_count), cal)}
+        after = step_sequence_problems(
+            effective_steps(dict(stored, **pairs), cal, flap_count), cal)
+        introduced = [p for p in after if tuple(sorted(p.items())) not in before]
+        if introduced:
+            first = introduced[0]
+            return jsonify(
+                error=(f"Module {mod_id}: flap {first['index']} would sit "
+                       f"{first['gap']} steps from flap {first['next']}, where the "
+                       f"reel spaces them about {first['nominal']}. A flap cannot "
+                       f"move past its neighbour, so this is a misread rather than "
+                       f"a correction."),
+                module=mod_id, problems=introduced), 409
 
     # With the server holding the positions there is nothing to put on a
     # module: the next page sends the step itself, and writing EEPROM as well

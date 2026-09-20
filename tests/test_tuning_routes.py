@@ -314,6 +314,41 @@ class ApplyTuningTests(SplitflapTestCase):
         self.assertEqual(body["writes"], 0)
         self.assertEqual(self.sent, [])
 
+    def test_a_flap_cannot_be_written_past_its_neighbour(self):
+        # Flap 11 sits at 704 on an untuned reel. Putting flap 10 beyond it
+        # describes a reel that turns both ways.
+        response = self.apply({"3": {"10": 705}})
+        self.assertEqual(response.status_code, 409)
+        body = response.get_json()
+        self.assertEqual(body["module"], 3)
+        self.assertIn("cannot move past its neighbour", body["error"])
+        self.assertEqual(self.sent, [])
+        self.assertNotIn("10", settings['tuned_chars'].get('3', {}))
+
+    def test_a_whole_flap_of_error_is_refused(self):
+        # What a misidentified flap produces, and what got written twice.
+        self.assertEqual(self.apply({"3": {"10": 640 + 64}}).status_code, 409)
+        self.assertEqual(self.sent, [])
+
+    def test_compensating_for_real_slop_is_still_allowed(self):
+        self.assertEqual(self.apply({"3": {"10": 640 + 20}}).status_code, 200)
+        self.assertEqual(settings['tuned_chars']['3']['10'], 660)
+
+    def test_a_module_already_out_of_order_stays_fixable(self):
+        # Refusing only what a write introduces. A module carrying a bad
+        # sequence from before must not be locked out of being corrected.
+        settings['tuned_chars']['3'] = {"10": 705}
+        response = self.apply({"3": {"10": 645}})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(settings['tuned_chars']['3']['10'], 645)
+
+    def test_the_check_looks_at_the_whole_batch_together(self):
+        # Two writes that are each fine against what is stored but wrong
+        # against each other.
+        response = self.apply({"3": {"10": 640, "11": 641}})
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(self.sent, [])
+
     def test_nothing_reaches_the_bus_when_the_server_holds_positions(self):
         # The next page sends the step itself, so writing EEPROM as well
         # would be wear on the one store here that loses writes.
