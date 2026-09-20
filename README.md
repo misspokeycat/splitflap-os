@@ -12,6 +12,9 @@ Built on [Adam G Makes' Split-Flap Display](https://github.com/adamgmakes/SplitF
 - **Playlists** — sequence apps and composed messages with per-entry timing and transitions
 - **Live preview** — animated flap simulation in the browser
 - **Calibration tools** — hardware inspector, auto fine-tune, teach mode
+- **Camera tune** — point a camera at the display and let it read itself: it finds the grid from
+  its own four corner modules, waits for the reels to stop, OCRs every module from one frame, and
+  re-reads after writing to confirm the corrections took (needs HTTPS — see below)
 - **Universal Firmware provisioning** — automatically discover, identify, assign, diagnose, and de-provision modules from the calibration page
 - **MQTT** — Home Assistant integration with auto-discovery
 - **Configurable serial port** — auto-detect available ports or enter a custom path; supports env var, settings UI, and Docker deployments

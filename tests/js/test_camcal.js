@@ -25,17 +25,19 @@ const FLAPS = 64, CAL = 4096, STEPS_PER_FLAP = CAL / FLAPS;   // 64
 
 const cc = {
   count: 45, cols: 15, rows: 3,
-  results: {}, unread: {},
+  results: {}, unread: {}, live: {},
   settings: { calibrations: {}, tuned_chars: {} },
 };
 
 const controls = { ccMinConf: { value: '60' }, ccMaxFlaps: { value: '2' } };
 
-const code = ['ccSolveH', 'ccGauss', 'ccApplyH', 'ccScaleH', 'ccCellQuad', 'ccScoreReads']
+const code = ['ccSolveH', 'ccGauss', 'ccApplyH', 'ccScaleH', 'ccCellQuad', 'ccScoreReads',
+              'ccCornerModules', 'ccCornerCentres', 'ccNextAction', 'ccOtsu', 'ccFindBlobs']
   .map(grab).join('\n');
 const api = new Function(
   'cc', 'CC_CELL_INSET', 'document', 'getCharMap', 'getFlapCount',
-  code + '; return {ccSolveH, ccApplyH, ccScaleH, ccCellQuad, ccScoreReads};'
+  code + '; return {ccSolveH, ccApplyH, ccScaleH, ccCellQuad, ccScoreReads,' +
+         ' ccCornerModules, ccCornerCentres, ccNextAction, ccOtsu, ccFindBlobs};'
 )(
   cc, 0.14,
   { getElementById: id => controls[id] },
@@ -100,7 +102,7 @@ near('module 44 sits in the bottom-right cell y', (qLast[0].y + qLast[2].y) / 2,
 
 // ── Reading a frame into corrections ───────────────────────
 
-const reset = () => { cc.results = {}; cc.unread = {}; };
+const reset = () => { cc.results = {}; cc.unread = {}; cc.live = {}; };
 
 // One module per case, all at char index 10 ("J"), currently resting on the
 // step the server reports as active.
@@ -181,6 +183,86 @@ api.ccScoreReads(at, readsOf({
 check('module 0 corrected from the shared frame',  cc.results[0][at].to,  FROM - STEPS_PER_FLAP);
 check('module 7 left alone from the shared frame', cc.results[7][at].err, 0);
 check('module 44 corrected from the shared frame', cc.results[44][at].to, FROM + STEPS_PER_FLAP);
+
+// ── Registering from the four corner modules ───────────────
+
+// The lit patch is a module's window, so its centre is the middle of a cell,
+// not the corner of the grid. Treating one as the other would shift the whole
+// grid by half a module and read every column off by one.
+check('corner modules are the grid corners',
+      JSON.stringify(api.ccCornerModules()), JSON.stringify([0, 14, 44, 30]));
+const centres = api.ccCornerCentres();
+near('first corner centre sits half a cell in (x)', centres[0].x, 0.5 / 15);
+near('first corner centre sits half a cell in (y)', centres[0].y, 0.5 / 3);
+near('third corner centre sits half a cell in (x)', centres[2].x, 1 - 0.5 / 15);
+near('third corner centre sits half a cell in (y)', centres[2].y, 1 - 0.5 / 3);
+
+// Photograph four lit corners through a skewed view, recover the transform
+// from their centres alone, and the rest of the grid must land where the
+// original put it.
+const truth = api.ccSolveH(UNIT, [{x:120,y:70}, {x:1180,y:40}, {x:1210,y:400}, {x:90,y:360}]);
+const seen  = centres.map(c => api.ccApplyH(truth, c.x, c.y));
+const recovered = api.ccSolveH(centres, seen);
+for (const m of [0, 7, 22, 44]) {
+  cc.H = truth;     const want = api.ccCellQuad(m);
+  cc.H = recovered; const got  = api.ccCellQuad(m);
+  near(`module ${m} lands in the same place (x)`, got[0].x, want[0].x, 1e-6);
+  near(`module ${m} lands in the same place (y)`, got[0].y, want[0].y, 1e-6);
+}
+cc.H = null;
+
+// ── Picking the lit corners out of a difference image ──────
+
+// Four bright squares on black, as the before/after difference produces.
+const DW = 200, DH = 60;
+const diff = new Uint8Array(DW * DH);
+const squares = [[20, 12], [170, 12], [170, 46], [20, 46]];
+for (const [cx, cy] of squares) {
+  for (let y = cy - 5; y <= cy + 5; y++) {
+    for (let x = cx - 5; x <= cx + 5; x++) diff[y * DW + x] = 240;
+  }
+}
+const blobs = api.ccFindBlobs(diff, DW, DH);
+check('four lit corners found', blobs.length, 4);
+
+// Ordered the way the corner modules are: top-left, top-right, bottom-right,
+// bottom-left. Getting this wrong mirrors or rotates the entire grid.
+const byY = blobs.slice().sort((a, b) => a.y - b.y);
+const ordered = byY.slice(0, 2).sort((a, b) => a.x - b.x)
+  .concat(byY.slice(2, 4).sort((a, b) => a.x - b.x).reverse());
+check('ordered top-left first',    `${Math.round(ordered[0].x)},${Math.round(ordered[0].y)}`, '20,12');
+check('then top-right',            `${Math.round(ordered[1].x)},${Math.round(ordered[1].y)}`, '170,12');
+check('then bottom-right',         `${Math.round(ordered[2].x)},${Math.round(ordered[2].y)}`, '170,46');
+check('then bottom-left',          `${Math.round(ordered[3].x)},${Math.round(ordered[3].y)}`, '20,46');
+
+// An unchanged frame differences to nothing, which must not be read as a grid.
+check('an empty difference finds nothing', api.ccFindBlobs(new Uint8Array(DW * DH), DW, DH).length, 0);
+
+// The threshold comes from the image, not a constant, so a dim room and a
+// bright one both split in the right place. ccFindBlobs takes pixels above
+// the cut, so the cut is the last background level, not a midpoint.
+const split = (dark, light) => {
+  const px = new Uint8Array(1000).fill(dark);
+  for (let i = 0; i < 200; i++) px[i] = light;
+  const cut = api.ccOtsu(px);
+  return dark <= cut && light > cut;
+};
+check('a dim scene splits correctly',   split(20, 90), true);
+check('a bright scene splits correctly', split(140, 230), true);
+check('a faint difference still splits', split(6, 30), true);
+
+// ── Deciding whether to write again ────────────────────────
+
+// Each pass that writes is another EEPROM write per corrected module, on
+// hardware that drops them. The loop has to stop on its own.
+check('a clean pass finishes',            api.ccNextAction([0], 3), 'done');
+check('a clean pass after writes finishes', api.ccNextAction([12, 3, 0], 3), 'done');
+check('the first pass with errors writes', api.ccNextAction([12], 3), 'apply');
+check('improving keeps going',            api.ccNextAction([12, 4], 3), 'apply');
+check('no improvement stops',             api.ccNextAction([12, 12], 3), 'stuck');
+check('getting worse stops',              api.ccNextAction([4, 9], 3), 'stuck');
+check('the pass limit stops it',          api.ccNextAction([12, 8, 5], 3), 'exhausted');
+check('a limit of one never writes twice', api.ccNextAction([12], 1), 'exhausted');
 
 console.log(failures ? `\n${failures} failure(s)` : '\nall checks passed');
 process.exit(failures ? 1 : 0);

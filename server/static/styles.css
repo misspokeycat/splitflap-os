@@ -352,7 +352,20 @@ input:checked+.slider:before{transform:translateX(20px)}
 #camCalOverlay .modal-content{max-width:720px;border-color:#3ec8b5}
 .cc-stage{position:relative;line-height:0;background:#000;border-radius:8px;overflow:hidden;margin:10px 0}
 .cc-stage video{display:block;width:100%;height:auto}
-.cc-stage canvas{position:absolute;top:0;left:0;width:100%;height:100%;cursor:crosshair}
+.cc-stage canvas{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none}
+.cc-handles{position:absolute;top:0;left:0;right:0;bottom:0}
+.cc-handle{position:absolute;width:30px;height:30px;margin:-15px 0 0 -15px;border-radius:50%;
+  border:2px solid #ffb000;background:rgba(255,176,0,.28);cursor:grab;touch-action:none}
+.cc-handle:active{cursor:grabbing;background:rgba(255,176,0,.5)}
+.cc-rotate{position:absolute;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;
+  justify-content:center;text-align:center;background:rgba(0,0,0,.82);color:#fff;
+  font-size:.95rem;line-height:1.5;padding:16px}
+.cc-stage-status{position:absolute;left:0;right:0;bottom:0;padding:6px 10px;font-size:.78rem;
+  line-height:1.4;color:#eee;background:linear-gradient(transparent,rgba(0,0,0,.8));
+  pointer-events:none;text-align:left}
+.cc-check{display:flex;gap:8px;align-items:flex-start;color:#bbb;font-size:.85rem;line-height:1.5;
+  margin:12px 0;cursor:pointer}
+.cc-check input{width:auto;margin:2px 0 0}
 .cc-hint{text-align:center;padding:10px;background:#111;border-radius:8px;font-size:.9rem;line-height:1.5}
 .cc-hint strong{color:#3ec8b5}
 .cc-grid{display:grid;grid-template-columns:repeat(15,1fr);gap:4px;margin:12px 0}

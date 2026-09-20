@@ -792,11 +792,41 @@
         Reads below the confidence floor, or implying an error larger than the flap limit, are
         discarded as misreads rather than written.
       </div>
+      <label class="cc-check">
+        <input type="checkbox" id="ccAuto" checked>
+        <span>Keep going until it reads clean — write the corrections, read everything back, and
+        repeat while it is still improving.</span>
+      </label>
+      <div style="margin:10px 0 4px">
+        <label class="field-label">Pass limit</label>
+        <input type="number" id="ccMaxPasses" value="3" min="1" max="4">
+        <div style="color:#666;font-size:.75rem;margin-top:4px">
+          Each pass rewrites EEPROM on the modules it corrects, so this is deliberately low. A pass
+          that is no better than the one before stops the run rather than writing again.
+        </div>
+      </div>
       <div style="display:flex;gap:8px;margin-top:16px">
         <button class="btn btn-success" style="flex:1" onclick="ccBeginCamera()">Start Camera</button>
         <button class="btn" style="background:#333;color:#aaa;border:1px solid #555" onclick="closeCamCal()">Cancel</button>
       </div>
     </div>
+
+    <!-- Live view, shared by every screen from here on -->
+    <div class="cc-stage" id="ccStage" style="display:none">
+      <video id="ccVideo" playsinline muted></video>
+      <canvas id="ccOverlay"></canvas>
+      <div id="ccHandles" class="cc-handles" style="display:none"></div>
+      <div id="ccRotate" class="cc-rotate" style="display:none">
+        <div>
+          <strong>Turn the phone sideways</strong>
+          <div style="margin-top:6px;color:#ccc;font-size:.82rem">
+            The display is a wide strip — it will not fit the frame in portrait.
+          </div>
+        </div>
+      </div>
+      <div id="ccStageStatus" class="cc-stage-status"></div>
+    </div>
+    <div id="ccHistory" class="cc-note" style="display:none"></div>
 
     <!-- Register corners -->
     <div id="cc_register" style="display:none">
@@ -805,15 +835,19 @@
         <strong style="color:var(--orange)">Camera unavailable</strong>
         <div id="ccCamErrorText" style="margin-top:8px;color:#bbb;font-size:.85rem;line-height:1.6"></div>
       </div>
-      <div class="cc-stage">
-        <video id="ccVideo" playsinline muted onclick="ccTapVideo(event)"></video>
-        <canvas id="ccOverlay" onclick="ccTapVideo(event)"></canvas>
+      <div id="ccRegHint" class="cc-hint">
+        Frame the whole display, then let it find itself — or drag the four handles until the
+        green cells sit over the modules.
       </div>
-      <div id="ccRegHint" class="cc-hint"></div>
       <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
-        <button class="btn btn-success btn-sm" id="ccRegNext" style="display:none" onclick="ccShow('preview')">Looks Right</button>
-        <button class="btn btn-secondary btn-sm" id="ccRegUndo" style="display:none" onclick="ccUndoCorner()">Undo Corner</button>
+        <button class="btn btn-success btn-sm" id="ccRegAuto" onclick="ccAutoRegister()">Find Grid Automatically</button>
+        <button class="btn btn-secondary btn-sm" id="ccRegNext" onclick="ccShow('preview')">Looks Right</button>
+        <button class="btn btn-secondary btn-sm" onclick="ccDefaultCorners()">Reset Handles</button>
         <button class="btn btn-sm" style="background:#333;color:#aaa;border:1px solid #555" onclick="closeCamCal()">Cancel</button>
+      </div>
+      <div style="color:#666;font-size:.75rem;margin-top:8px">
+        Automatic detection lights the four corner modules and photographs the display with and
+        without them lit — whatever changed in exactly those four places is the grid.
       </div>
     </div>
 
@@ -850,7 +884,8 @@
       <div id="ccSweepNote" style="color:#888;font-size:.8rem;min-height:1.2em"></div>
       <div class="cc-grid" id="ccSweepGrid"></div>
       <div style="color:#666;font-size:.75rem;margin-bottom:10px">
-        Green = read and correct · red = a correction is staged · grey = not read yet.
+        Green = read and correct · red = a correction is staged · grey = not read yet. The live
+        view above shows each module's reading as it comes in.
       </div>
       <button class="btn btn-warning btn-sm" onclick="ccAbortSweep()">Stop Sweep</button>
     </div>
@@ -858,17 +893,23 @@
     <!-- Review -->
     <div id="cc_review" style="display:none">
       <h3 style="color:#3ec8b5;margin-bottom:10px">Review</h3>
-      <div id="ccReviewSummary" style="color:#ddd;font-size:.9rem;line-height:1.6;margin-bottom:10px"></div>
+      <div id="ccOutcome" class="cc-note" style="display:none"></div>
+      <div id="ccReviewSummary" style="color:#ddd;font-size:.9rem;line-height:1.6;margin:10px 0"></div>
       <div class="cc-grid" id="ccReviewGrid"></div>
       <div style="color:#666;font-size:.75rem;margin-bottom:10px">
-        A red cell shows how many positions that module needs corrected. Grey means it was never read.
+        A red cell shows how many positions that module still reads wrong. Grey means it was never read.
       </div>
       <div id="ccSystemic" class="cc-note" style="display:none"></div>
       <div id="ccAudit" class="cc-note" style="display:none"></div>
       <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap">
         <button class="btn btn-success" style="flex:1" id="ccApplyBtn" onclick="ccApply()">Apply Corrections</button>
-        <button class="btn btn-secondary btn-sm" onclick="ccRestart()">Sweep Again</button>
+        <button class="btn btn-warning btn-sm" id="ccRecheckBtn" onclick="ccRecheck()">Re-check</button>
+        <button class="btn btn-secondary btn-sm" onclick="ccRestart()">Start Over</button>
         <button class="btn btn-sm" style="background:#333;color:#aaa;border:1px solid #555" onclick="closeCamCal()">Close</button>
+      </div>
+      <div style="color:#666;font-size:.75rem;margin-top:8px">
+        Re-check reads every position again without writing anything — the only thing that proves a
+        correction actually took.
       </div>
     </div>
 

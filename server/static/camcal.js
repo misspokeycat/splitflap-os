@@ -7,10 +7,14 @@
 // flap is `calibration / flap_count` motor steps — so one photo yields an
 // exact correction for all 45 modules at once.
 //
-// The sweep writes nothing. Corrections are staged in the browser,
-// reviewed, and then written once in a single batch through
-// /restore_settings. Per-nudge EEPROM writes land while the motors are
-// drawing hardest, which is how modules lose their tuning.
+// A sweep writes nothing. Corrections are staged in the browser, reviewed,
+// and then written once in a single batch through /restore_settings.
+// Per-nudge EEPROM writes land while the motors are drawing hardest, which
+// is how modules lose their tuning.
+//
+// Writing a correction is not evidence it worked, so a pass can be repeated:
+// re-reading the display after a write is the only thing that proves the
+// module moved where it was told.
 
 const CC_MOTION_MAX_W   = 480;   // frame width used for settle detection
 const CC_MOTION_W       = 12;    // per-cell crop for settle detection
@@ -25,6 +29,9 @@ const CC_NOISE_GAIN     = 3.0;
 const CC_NOISE_MIN      = 2.0;
 const CC_CELL_INSET     = 0.14;  // trim each cell toward its centre, away from bezels
 const CC_OCR_WORKERS    = 3;
+const CC_PREVIEW_MS     = 50;    // live overlay redraw interval
+const CC_MAX_PASSES     = 4;     // ceiling on write/re-read rounds
+const CC_REGISTER_CHARS = 'wyog'; // solid colour flaps, brightest first
 const CC_TESSERACT_SRC  = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
 
 // OCR-able flaps. The colour tiles (roygbpw), the blank and the symbols are
@@ -42,19 +49,30 @@ const cc = {
   rows:        3,
   cols:        15,
   count:       45,
+  landscape:   true,
   threshold:   CC_NOISE_MIN,
   sweep:       [],     // char indices to visit
   results:     {},     // modId -> { charIndex: {read, conf, err, from, to} }
   unread:      {},     // modId -> count of positions we could not read
+  live:        {},     // modId -> {char, err} from the frame just read
+  history:     [],     // wrong-count after each completed pass
+  pass:        0,
+  outcome:     null,   // why the run stopped, see CC_OUTCOME
   settings:    null,
   ocr:         [],
   abort:       false,
   running:     false,
+  drag:        null,   // index of the corner handle being dragged
+  previewId:   null,
   frameCanvas: null,
   workCanvas:  null,
 };
 
 // ── Screens ────────────────────────────────────────────────
+
+const CC_SCREENS = ['start', 'register', 'preview', 'homing', 'sweep', 'review'];
+// Screens that want to see what the camera sees.
+const CC_STAGE_SCREENS = ['register', 'preview', 'homing', 'sweep', 'review'];
 
 function openCamCal(){
   document.getElementById('camCalOverlay').style.display = 'flex';
@@ -70,15 +88,24 @@ function closeCamCal(){
 
 function ccShow(name){
   cc.screen = name;
-  for(const s of ['start','register','preview','homing','sweep','review']){
+  for(const s of CC_SCREENS){
     const el = document.getElementById('cc_' + s);
     if(el) el.style.display = (s === name) ? 'block' : 'none';
   }
+  // The stage is shared rather than per-screen: losing sight of the display
+  // mid-sweep is how you discover an hour later that the camera was nudged.
+  const stage = document.getElementById('ccStage');
+  stage.style.display = (CC_STAGE_SCREENS.indexOf(name) >= 0 && cc.stream) ? 'block' : 'none';
+  document.getElementById('ccHandles').style.display = (name === 'register') ? 'block' : 'none';
 }
 
 function ccResetRun(){
   cc.results = {};
   cc.unread  = {};
+  cc.live    = {};
+  cc.history = [];
+  cc.pass    = 0;
+  cc.outcome = null;
   cc.abort   = false;
   cc.running = false;
 }
@@ -86,6 +113,7 @@ function ccResetRun(){
 function ccStop(){
   cc.abort   = true;
   cc.running = false;
+  ccStopPreview();
   if(cc.stream){
     cc.stream.getTracks().forEach(t => t.stop());
     cc.stream = null;
@@ -94,6 +122,11 @@ function ccStop(){
     try { slot.worker.terminate(); } catch(e) {}
   }
   cc.ocr = [];
+}
+
+function ccStatus(text){
+  const el = document.getElementById('ccStageStatus');
+  if(el) el.textContent = text || '';
 }
 
 // ── Camera ─────────────────────────────────────────────────
@@ -131,9 +164,10 @@ async function ccBeginCamera(){
   try {
     cc.stream = await navigator.mediaDevices.getUserMedia({
       video: {
-        facingMode: { ideal: 'environment' },
-        width:      { ideal: 3840 },
-        height:     { ideal: 2160 },
+        facingMode:  { ideal: 'environment' },
+        width:       { ideal: 3840 },
+        height:      { ideal: 2160 },
+        aspectRatio: { ideal: 16 / 9 },
       },
     });
   } catch(err){
@@ -151,78 +185,267 @@ async function ccBeginCamera(){
   cc.cols  = (globalSettings && parseInt(globalSettings.sim_cols)) || 15;
   cc.count = cc.rows * cc.cols;
 
-  cc.corners = [];
-  cc.H = null;
-  ccRenderRegister();
+  ccShow('register');
+  ccCheckOrientation();
+  ccDefaultCorners();
+  ccStartPreview();
 }
 
-// ── Corner registration ────────────────────────────────────
+// The display is a 15-wide strip; in portrait it is either unreadably small
+// or cropped. Everything downstream assumes the landscape framing, so this is
+// checked rather than coped with.
+function ccCheckOrientation(){
+  const v = cc.video;
+  if(!v || !v.videoWidth) return true;
+  cc.landscape = v.videoWidth >= v.videoHeight;
+  const warn = document.getElementById('ccRotate');
+  warn.style.display = cc.landscape ? 'none' : 'block';
+  for(const id of ['ccRegAuto', 'ccRegNext']){
+    const el = document.getElementById(id);
+    if(el) el.disabled = !cc.landscape;
+  }
+  return cc.landscape;
+}
 
-const CC_CORNER_NAMES = ['top-left', 'top-right', 'bottom-right', 'bottom-left'];
+window.addEventListener('orientationchange', () => setTimeout(ccCheckOrientation, 400));
+window.addEventListener('resize', () => { if(cc.stream) ccCheckOrientation(); });
+
+// ── Registration ───────────────────────────────────────────
+
 const CC_UNIT = [{x:0,y:0}, {x:1,y:0}, {x:1,y:1}, {x:0,y:1}];
 
-function ccRenderRegister(){
-  const n = cc.corners.length;
-  const hint = document.getElementById('ccRegHint');
-  if(n < 4){
-    const corner = [0, cc.cols - 1, cc.count - 1, cc.count - cc.cols][n];
-    hint.innerHTML = 'Tap the <strong>' + CC_CORNER_NAMES[n] + '</strong> corner of the display — ' +
-                     'the outer corner of module ' + corner + '.';
-  } else {
-    hint.innerHTML = 'All four corners set. Check that the green cells line up with the modules.';
-  }
-  document.getElementById('ccRegNext').style.display = (n === 4) ? 'inline-block' : 'none';
-  document.getElementById('ccRegUndo').style.display = (n > 0)  ? 'inline-block' : 'none';
-  ccDrawOverlay();
+// Start from a rectangle covering most of the frame. Dragging four handles
+// that are already on screen, with the grid drawn live inside them, is a far
+// steadier job than tapping four corners at nothing.
+function ccDefaultCorners(){
+  const w = cc.video.videoWidth, h = cc.video.videoHeight;
+  const mx = w * 0.08, my = h * 0.30;
+  cc.corners = [{x:mx, y:my}, {x:w-mx, y:my}, {x:w-mx, y:h-my}, {x:mx, y:h-my}];
+  cc.H = ccSolveH(CC_UNIT, cc.corners);
+  ccRenderHandles();
 }
 
-function ccTapVideo(ev){
-  if(cc.corners.length >= 4) return;
-  ev.preventDefault();
-  const v = cc.video;
-  const r = v.getBoundingClientRect();
-  const pt = ev.touches ? ev.touches[0] : ev;
-  cc.corners.push({
-    x: (pt.clientX - r.left) * (v.videoWidth  / r.width),
-    y: (pt.clientY - r.top)  * (v.videoHeight / r.height),
+function ccRegHint(text){
+  document.getElementById('ccRegHint').innerHTML = text;
+}
+
+// Corner handles, positioned in CSS pixels over the video.
+function ccRenderHandles(){
+  const box = document.getElementById('ccHandles');
+  const v = cc.video, r = v.getBoundingClientRect();
+  const sx = r.width / (v.videoWidth || 1), sy = r.height / (v.videoHeight || 1);
+  box.innerHTML = '';
+  cc.corners.forEach((c, i) => {
+    const h = document.createElement('div');
+    h.className = 'cc-handle';
+    h.style.left = (c.x * sx) + 'px';
+    h.style.top  = (c.y * sy) + 'px';
+    h.dataset.corner = String(i);
+    h.addEventListener('pointerdown', ccHandleDown);
+    box.appendChild(h);
   });
-  if(cc.corners.length === 4) cc.H = ccSolveH(CC_UNIT, cc.corners);
-  ccRenderRegister();
 }
 
-function ccUndoCorner(){
-  cc.corners.pop();
-  cc.H = null;
-  ccRenderRegister();
+function ccHandleDown(ev){
+  ev.preventDefault();
+  cc.drag = parseInt(ev.currentTarget.dataset.corner);
+  ev.currentTarget.setPointerCapture(ev.pointerId);
+  ev.currentTarget.addEventListener('pointermove', ccHandleMove);
+  ev.currentTarget.addEventListener('pointerup', ccHandleUp);
+  ev.currentTarget.addEventListener('pointercancel', ccHandleUp);
 }
 
-function ccDrawOverlay(){
-  const v = cc.video, cv = document.getElementById('ccOverlay');
-  const r = v.getBoundingClientRect();
-  cv.width  = r.width;
-  cv.height = r.height;
-  const sx = r.width  / (v.videoWidth  || 1);
-  const sy = r.height / (v.videoHeight || 1);
-  const ctx = cv.getContext('2d');
-  ctx.clearRect(0, 0, cv.width, cv.height);
+function ccHandleMove(ev){
+  if(cc.drag === null) return;
+  ev.preventDefault();
+  const v = cc.video, r = v.getBoundingClientRect();
+  const x = (ev.clientX - r.left) * (v.videoWidth  / r.width);
+  const y = (ev.clientY - r.top)  * (v.videoHeight / r.height);
+  cc.corners[cc.drag] = {
+    x: Math.max(0, Math.min(v.videoWidth,  x)),
+    y: Math.max(0, Math.min(v.videoHeight, y)),
+  };
+  cc.H = ccSolveH(CC_UNIT, cc.corners);
+  ccRenderHandles();
+}
 
-  ctx.fillStyle = '#ffb000';
-  for(const c of cc.corners){
-    ctx.beginPath();
-    ctx.arc(c.x * sx, c.y * sy, 7, 0, Math.PI * 2);
-    ctx.fill();
+function ccHandleUp(ev){
+  cc.drag = null;
+  ev.currentTarget.removeEventListener('pointermove', ccHandleMove);
+  ev.currentTarget.removeEventListener('pointerup', ccHandleUp);
+  ev.currentTarget.removeEventListener('pointercancel', ccHandleUp);
+}
+
+// The four corner modules, row-major.
+function ccCornerModules(){
+  return [0, cc.cols - 1, cc.count - 1, cc.count - cc.cols];
+}
+
+// Their centres in unit space. A module's window is a cell, so the lit patch
+// is at the middle of one, not at the corner of the grid.
+function ccCornerCentres(){
+  const h = 0.5 / cc.cols, v = 0.5 / cc.rows;
+  return [
+    { x: h,     y: v     },
+    { x: 1 - h, y: v     },
+    { x: 1 - h, y: 1 - v },
+    { x: h,     y: 1 - v },
+  ];
+}
+
+function ccPage(chars){
+  return fetch('/update_playlist', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pages: [chars], delay: 3600 }),
+  });
+}
+
+// Find the grid by asking the display to point at its own corners: light the
+// four corner modules and photograph the display with and without them lit.
+// The difference is those four patches and nothing else, so it does not
+// matter what colour the other flaps are or how evenly the room is lit —
+// only that something changed exactly where we said it would.
+async function ccAutoRegister(){
+  if(!ccCheckOrientation()) return;
+  const btn = document.getElementById('ccRegAuto');
+  btn.disabled = true;
+
+  if(cc.rows < 2 || cc.cols < 2){
+    ccRegHint('Corner detection needs at least a 2x2 grid — drag the corners instead.');
+    btn.disabled = false;
+    return;
   }
 
-  if(cc.corners.length !== 4 || !cc.H) return;
-  ctx.strokeStyle = 'rgba(0,255,140,.85)';
-  ctx.lineWidth = 1.5;
-  for(let i = 0; i < cc.count; i++){
-    const quad = ccCellQuad(i);
-    ctx.beginPath();
-    quad.forEach((p, k) => k ? ctx.lineTo(p.x * sx, p.y * sy) : ctx.moveTo(p.x * sx, p.y * sy));
-    ctx.closePath();
-    ctx.stroke();
+  const map = getCharMap(0);
+  let lit = '';
+  for(const ch of CC_REGISTER_CHARS){
+    if(map.indexOf(ch) > 0){ lit = ch; break; }
   }
+  if(!lit){
+    ccRegHint('No solid colour flap in the character map — drag the corners instead.');
+    btn.disabled = false;
+    return;
+  }
+
+  const blank   = map[0];
+  const corners = ccCornerModules();
+  const litPage = Array(cc.count).fill(blank);
+  for(const m of corners) litPage[m] = lit;
+
+  await fetch('/stop_app', { method: 'POST' });
+
+  ccRegHint('Clearing the display…');
+  await ccPage(Array(cc.count).fill(blank).join(''));
+  await ccSleep(1200);              // let the display loop pick the page up
+  await ccWaitForFrameQuiet();
+  const before = ccGrayOf(ccFrame(CC_MOTION_MAX_W).img);
+
+  ccRegHint('Lighting the four corner modules…');
+  await ccPage(litPage.join(''));
+  await ccSleep(1200);
+  await ccWaitForFrameQuiet();
+
+  // The corners may not have finished turning when the loop dispatched the
+  // page, so look a few times before giving up.
+  let found = null;
+  for(let attempt = 0; attempt < 4 && !found; attempt++){
+    const frame = ccFrame(CC_MOTION_MAX_W);
+    const after = ccGrayOf(frame.img);
+    const diff  = new Uint8Array(after.length);
+    for(let i = 0; i < after.length; i++) diff[i] = Math.abs(after[i] - before[i]);
+    const blobs = ccFindBlobs(diff, frame.img.width, frame.img.height);
+    if(blobs.length >= 4) found = { blobs: blobs, scale: frame.scale };
+    else await ccSleep(600);
+  }
+
+  if(!found){
+    ccRegHint('Could not pick out the four lit corners. Check they are visible and lit ' +
+              'evenly, or drag the corners by hand.');
+    btn.disabled = false;
+    return;
+  }
+
+  // Four biggest changes, ordered top-left, top-right, bottom-right,
+  // bottom-left — the order the corner modules are in.
+  const best = found.blobs.slice().sort((a, b) => b.area - a.area).slice(0, 4);
+  const byY  = best.slice().sort((a, b) => a.y - b.y);
+  const top  = byY.slice(0, 2).sort((a, b) => a.x - b.x);
+  const bot  = byY.slice(2, 4).sort((a, b) => a.x - b.x);
+  const dst  = [top[0], top[1], bot[1], bot[0]]
+    .map(b => ({ x: b.x / found.scale, y: b.y / found.scale }));
+
+  const H = ccSolveH(ccCornerCentres(), dst);
+  if(!H){
+    ccRegHint('The four corners came out collinear — drag them by hand instead.');
+    btn.disabled = false;
+    return;
+  }
+
+  cc.H = H;
+  cc.corners = CC_UNIT.map(u => ccApplyH(H, u.x, u.y));
+  ccRenderHandles();
+  ccRegHint('Grid found from the four corner modules. Check the cells line up, and drag ' +
+            'any corner to adjust.');
+  btn.disabled = false;
+}
+
+// ── Blob finding ───────────────────────────────────────────
+
+// Otsu: split the histogram where it separates best, so the threshold comes
+// from this room's light rather than a constant.
+function ccOtsu(gray){
+  const hist = new Array(256).fill(0);
+  for(let i = 0; i < gray.length; i++) hist[gray[i]]++;
+  const total = gray.length;
+  let sum = 0;
+  for(let t = 0; t < 256; t++) sum += t * hist[t];
+  let sumB = 0, wB = 0, best = 0, cut = 127;
+  for(let t = 0; t < 256; t++){
+    wB += hist[t];
+    if(!wB) continue;
+    const wF = total - wB;
+    if(!wF) break;
+    sumB += t * hist[t];
+    const mB = sumB / wB, mF = (sum - sumB) / wF;
+    const between = wB * wF * (mB - mF) * (mB - mF);
+    if(between > best){ best = between; cut = t; }
+  }
+  return cut;
+}
+
+// Connected bright regions of a grayscale image, with the specks and the
+// whole-frame blobs dropped. Returns centroids with their areas.
+function ccFindBlobs(gray, w, h){
+  const n = w * h;
+  const cut = ccOtsu(gray);
+  const seen = new Uint8Array(n);
+  const stack = new Int32Array(n);
+  const blobs = [];
+
+  for(let start = 0; start < n; start++){
+    if(seen[start] || gray[start] <= cut) continue;
+    let top = 0, area = 0, sx = 0, sy = 0;
+    let minX = w, maxX = 0, minY = h, maxY = 0;
+    stack[top++] = start;
+    seen[start] = 1;
+    while(top){
+      const p = stack[--top];
+      const x = p % w, y = (p / w) | 0;
+      area++; sx += x; sy += y;
+      if(x < minX) minX = x;
+      if(x > maxX) maxX = x;
+      if(y < minY) minY = y;
+      if(y > maxY) maxY = y;
+      if(x > 0     && !seen[p-1] && gray[p-1] > cut){ seen[p-1] = 1; stack[top++] = p-1; }
+      if(x < w - 1 && !seen[p+1] && gray[p+1] > cut){ seen[p+1] = 1; stack[top++] = p+1; }
+      if(y > 0     && !seen[p-w] && gray[p-w] > cut){ seen[p-w] = 1; stack[top++] = p-w; }
+      if(y < h - 1 && !seen[p+w] && gray[p+w] > cut){ seen[p+w] = 1; stack[top++] = p+w; }
+    }
+    if(area < 40 || area > n * 0.2) continue;   // specks, and the wall behind it
+    blobs.push({ x: sx / area, y: sy / area, area: area,
+                 w: maxX - minX + 1, h: maxY - minY + 1 });
+  }
+  return blobs;
 }
 
 // ── Geometry ───────────────────────────────────────────────
@@ -248,7 +471,7 @@ function ccGauss(A, b){
     for(let r = col + 1; r < n; r++){
       if(Math.abs(M[r][col]) > Math.abs(M[piv][col])) piv = r;
     }
-    if(Math.abs(M[piv][col]) < 1e-9) return null;
+    if(Math.abs(M[piv][col]) < 1e-12) return null;
     const tmp = M[col]; M[col] = M[piv]; M[piv] = tmp;
     for(let r = 0; r < n; r++){
       if(r === col) continue;
@@ -281,6 +504,72 @@ function ccCellQuad(modId, H){
   const v0 = (row + i) / cc.rows, v1 = (row + 1 - i) / cc.rows;
   return [ccApplyH(H, u0, v0), ccApplyH(H, u1, v0),
           ccApplyH(H, u1, v1), ccApplyH(H, u0, v1)];
+}
+
+// ── Live preview ───────────────────────────────────────────
+
+// The grid stays drawn over the video for the whole run, carrying each
+// module's latest reading. A camera that gets nudged is then obvious while
+// it still matters, instead of showing up as a column of bad reads.
+function ccStartPreview(){
+  ccStopPreview();
+  cc.previewId = setInterval(ccDrawOverlay, CC_PREVIEW_MS);
+  ccDrawOverlay();
+}
+
+function ccStopPreview(){
+  if(cc.previewId){ clearInterval(cc.previewId); cc.previewId = null; }
+}
+
+function ccDrawOverlay(){
+  const v = cc.video, cv = document.getElementById('ccOverlay');
+  if(!v || !cv || !cc.H) return;
+  const r = v.getBoundingClientRect();
+  if(!r.width) return;
+  if(cv.width !== Math.round(r.width) || cv.height !== Math.round(r.height)){
+    cv.width = Math.round(r.width);
+    cv.height = Math.round(r.height);
+  }
+  const sx = r.width / (v.videoWidth || 1), sy = r.height / (v.videoHeight || 1);
+  const ctx = cv.getContext('2d');
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.lineWidth = 1.5;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = Math.max(9, Math.round(cv.height / cc.rows / 3)) + 'px monospace';
+
+  for(let i = 0; i < cc.count; i++){
+    const quad = cc.corners.length === 4 ? ccCellQuad(i) : null;
+    if(!quad) continue;
+    const pts = quad.map(p => ({ x: p.x * sx, y: p.y * sy }));
+    const live = cc.live[i];
+
+    ctx.beginPath();
+    pts.forEach((p, k) => k ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y));
+    ctx.closePath();
+
+    if(live && live.err === 0){
+      ctx.strokeStyle = 'rgba(80,220,120,.95)';
+      ctx.fillStyle   = 'rgba(40,160,90,.18)';
+    } else if(live && live.err !== undefined){
+      ctx.strokeStyle = 'rgba(255,90,90,.95)';
+      ctx.fillStyle   = 'rgba(200,50,50,.22)';
+    } else if(live){
+      ctx.strokeStyle = 'rgba(255,190,60,.9)';
+      ctx.fillStyle   = 'rgba(200,140,40,.16)';
+    } else {
+      ctx.strokeStyle = 'rgba(0,255,140,.7)';
+      ctx.fillStyle   = 'rgba(0,0,0,0)';
+    }
+    ctx.fill();
+    ctx.stroke();
+
+    if(live && live.char){
+      const cx = (pts[0].x + pts[2].x) / 2, cy = (pts[0].y + pts[2].y) / 2;
+      ctx.fillStyle = '#fff';
+      ctx.fillText(live.char, cx, cy);
+    }
+  }
 }
 
 // ── Frame capture ──────────────────────────────────────────
@@ -333,13 +622,15 @@ function ccGrabCells(w, h, maxWidth){
   return cells;
 }
 
-function ccGray(cell){
-  const n = cell.width * cell.height, g = new Uint8Array(n);
+function ccGrayOf(img){
+  const n = img.width * img.height, g = new Uint8Array(n);
   for(let i = 0; i < n; i++){
-    g[i] = (cell.data[i * 4] * 0.299 + cell.data[i * 4 + 1] * 0.587 + cell.data[i * 4 + 2] * 0.114) | 0;
+    g[i] = (img.data[i*4] * 0.299 + img.data[i*4+1] * 0.587 + img.data[i*4+2] * 0.114) | 0;
   }
   return g;
 }
+
+const ccGray = ccGrayOf;
 
 function ccMad(a, b){
   let sum = 0;
@@ -352,8 +643,8 @@ const ccSleep = ms => new Promise(r => setTimeout(r, ms));
 // ── Settle detection ───────────────────────────────────────
 
 // A recheck photo taken while the reels are still turning reads whichever
-// flap happens to be passing. Learn how much the image moves when nothing is
-// moving, then treat anything above that as motion.
+// flap is passing. Learn how much the image moves when nothing is moving,
+// then treat anything above that as motion.
 async function ccLearnNoiseFloor(){
   let prev = null, worst = 0;
   for(let f = 0; f < CC_NOISE_FRAMES; f++){
@@ -387,6 +678,23 @@ async function ccWaitForSettle(onTick){
     await ccSleep(CC_FRAME_MS);
   }
   return { settled: false, moving: moving };
+}
+
+// Settle without a grid, for the frame that is going to define the grid.
+async function ccWaitForFrameQuiet(){
+  const t0 = performance.now();
+  let prev = null, stable = 0;
+  while(performance.now() - t0 < CC_SETTLE_TIMEOUT){
+    if(cc.abort) return false;
+    const cur = ccGrayOf(ccFrame(CC_MOTION_MAX_W).img);
+    if(prev){
+      stable = ccMad(prev, cur) > CC_NOISE_MIN ? 0 : stable + 1;
+      if(stable >= CC_STABLE_FRAMES) return true;
+    }
+    prev = cur;
+    await ccSleep(CC_FRAME_MS);
+  }
+  return false;
 }
 
 // ── OCR ────────────────────────────────────────────────────
@@ -461,7 +769,7 @@ async function ccRecognizeAll(cells){
   return out;
 }
 
-// ── The sweep ──────────────────────────────────────────────
+// ── Passes ─────────────────────────────────────────────────
 
 function ccBuildSweep(){
   const set = document.getElementById('ccSweepSet').value;
@@ -478,6 +786,7 @@ function ccBuildSweep(){
 }
 
 async function ccBegin(){
+  if(!ccCheckOrientation()) return;
   cc.sweep = ccBuildSweep();
   if(!cc.sweep.length){ showToast('No readable flap positions in the char map', 'error'); return; }
 
@@ -513,11 +822,67 @@ async function ccBegin(){
   await ccWaitForSettle();
 
   ccShow('sweep');
-  await ccRunSweep();
+  await ccRunUntilClean();
 }
 
-async function ccRunSweep(){
+// What to do after a pass, given how many modules were still wrong after each
+// pass so far. Kept separate from the loop that runs it so the decision can
+// be checked without a camera.
+function ccNextAction(history, maxPasses){
+  const last = history[history.length - 1];
+  if(last === 0) return 'done';
+  if(history.length >= maxPasses) return 'exhausted';
+  // Writes that do not reduce the error are not going to start working on
+  // the next round, and each round is another EEPROM write per module.
+  if(history.length >= 2 && last >= history[history.length - 2]) return 'stuck';
+  return 'apply';
+}
+
+// Measure, write, measure again — repeating while it is still improving.
+// Auto mode does the whole thing; otherwise it stops after the first pass and
+// waits to be told.
+async function ccRunUntilClean(){
+  const auto = document.getElementById('ccAuto').checked;
+  const maxPasses = auto
+    ? Math.max(1, Math.min(CC_MAX_PASSES, parseInt(document.getElementById('ccMaxPasses').value) || 1))
+    : 1;
+
+  while(true){
+    cc.pass++;
+    ccShow('sweep');
+    await ccSweepPass();
+    if(cc.abort) break;
+
+    const wrong = ccTotalWrong();
+    cc.history.push(wrong);
+    ccRenderHistory();
+
+    const action = auto ? ccNextAction(cc.history, maxPasses)
+                        : (wrong === 0 ? 'done' : 'exhausted');
+    if(action !== 'apply'){
+      cc.outcome = action;
+      break;
+    }
+
+    ccShow('review');
+    ccRenderReview();
+    ccStatus('Pass ' + cc.pass + ': writing ' + wrong + ' correction(s)…');
+    const ok = await ccWriteCorrections();
+    if(!ok){ cc.outcome = 'write-failed'; break; }
+  }
+
+  cc.running = false;
+  ccRenderReview();
+  ccShow('review');
+}
+
+// One read of every position. Nothing is written here.
+async function ccSweepPass(){
   cc.running = true;
+  cc.results = {};
+  cc.unread  = {};
+  cc.live    = {};
+
   const bar   = document.getElementById('ccSweepBar');
   const label = document.getElementById('ccSweepLabel');
   const note  = document.getElementById('ccSweepNote');
@@ -528,10 +893,11 @@ async function ccRunSweep(){
     const shown = getCharMap(0)[idx];
 
     bar.style.width = Math.round((n / cc.sweep.length) * 100) + '%';
-    label.textContent = 'Position ' + (n + 1) + ' of ' + cc.sweep.length +
+    label.textContent = 'Pass ' + cc.pass + ' · position ' + (n + 1) + ' of ' + cc.sweep.length +
                         ' — "' + shown + '" (index ' + idx + ')';
 
     note.textContent = 'Moving…';
+    cc.live = {};
     await fetch('/auto_tune', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: 'goto_char', char_index: idx }),
@@ -565,8 +931,6 @@ async function ccRunSweep(){
 
   bar.style.width = '100%';
   cc.running = false;
-  ccRenderReview();
-  ccShow('review');
 }
 
 // Turn one frame's reads into staged corrections.
@@ -582,6 +946,7 @@ function ccScoreReads(idx, reads, positions){
 
     if(readIdx < 0 || !r || r.conf < minConf){
       cc.unread[m] = (cc.unread[m] || 0) + 1;
+      cc.live[m] = { char: r && r.char ? r.char : '?' };
       continue;
     }
 
@@ -593,6 +958,7 @@ function ccScoreReads(idx, reads, positions){
     // seventeen is a misread, not a mechanism — drop it rather than write it.
     if(Math.abs(err) > maxFlaps){
       cc.unread[m] = (cc.unread[m] || 0) + 1;
+      cc.live[m] = { char: r.char };
       continue;
     }
 
@@ -608,6 +974,7 @@ function ccScoreReads(idx, reads, positions){
 
     if(!cc.results[m]) cc.results[m] = {};
     cc.results[m][idx] = { read: r.char, conf: Math.round(r.conf), err: err, from: from, to: to };
+    cc.live[m] = { char: r.char, err: err };
   }
 }
 
@@ -620,6 +987,12 @@ function ccModStats(m){
     unread: cc.unread[m] || 0,
     byIdx:  byIdx,
   };
+}
+
+function ccTotalWrong(){
+  let total = 0;
+  for(let m = 0; m < cc.count; m++) total += ccModStats(m).wrong;
+  return total;
 }
 
 function ccRenderSweepGrid(){
@@ -637,12 +1010,27 @@ function ccRenderSweepGrid(){
   }
 }
 
+function ccRenderHistory(){
+  const el = document.getElementById('ccHistory');
+  if(!cc.history.length){ el.style.display = 'none'; return; }
+  el.style.display = 'block';
+  el.innerHTML = '<strong>Passes:</strong> ' + cc.history.map((n, i) =>
+    'pass ' + (i + 1) + ' — ' + (n === 0 ? 'clean' : n + ' wrong')).join(' → ');
+}
+
 function ccAbortSweep(){
   cc.abort = true;
   showToast('Stopping after this position — nothing has been written', 'warn');
 }
 
 // ── Review ─────────────────────────────────────────────────
+
+const CC_OUTCOME = {
+  'done':         ['var(--green)',  'Every module read correctly at every position checked.'],
+  'exhausted':    ['var(--orange)', 'Stopped at the pass limit with corrections still outstanding.'],
+  'stuck':        ['var(--orange)', 'The last pass was no better than the one before it, so it stopped rather than write again. What is left is likely mechanical, or a module the camera cannot read.'],
+  'write-failed': ['var(--red)',    'A write failed; nothing further was attempted.'],
+};
 
 function ccRenderReview(){
   const grid = document.getElementById('ccReviewGrid');
@@ -664,12 +1052,23 @@ function ccRenderReview(){
 
   document.getElementById('ccReviewSummary').innerHTML =
     '<strong>' + totalFixes + '</strong> position' + (totalFixes === 1 ? '' : 's') +
-    ' to correct across ' + cc.count + ' modules' +
-    (blind ? ' · <span style="color:var(--orange)">' + blind + ' module(s) never read</span>' : '') +
-    '<br><span style="color:#777;font-size:.8rem">Nothing has been written yet.</span>';
+    ' still reading wrong across ' + cc.count + ' modules' +
+    (blind ? ' · <span style="color:var(--orange)">' + blind + ' module(s) never read</span>' : '');
 
+  const outcome = document.getElementById('ccOutcome');
+  const known = CC_OUTCOME[cc.outcome];
+  if(known){
+    outcome.style.display = 'block';
+    outcome.innerHTML = '<strong style="color:' + known[0] + '">' +
+      (cc.outcome === 'done' ? 'Calibrated.' : 'Not finished.') + '</strong> ' + known[1];
+  } else {
+    outcome.style.display = 'none';
+  }
+
+  ccRenderHistory();
   ccRenderSystemic();
   document.getElementById('ccApplyBtn').disabled = (totalFixes === 0);
+  document.getElementById('ccRecheckBtn').disabled = false;
 }
 
 // A module wrong by the same amount everywhere has a home-offset problem, not
@@ -703,14 +1102,10 @@ function ccRenderSystemic(){
     'instead write a correction for every position measured.</span>';
 }
 
-// Write once, at the end. restore_module_settings erases a module's tuning and
-// rewrites it, so each module must be sent its complete map — corrections
-// merged over what is already stored, not the corrections alone.
-async function ccApply(){
-  const btn = document.getElementById('ccApplyBtn');
-  btn.disabled = true;
-  btn.textContent = 'Writing…';
-
+// Write once, at the end of a pass. restore_module_settings erases a module's
+// tuning and rewrites it, so each module must be sent its complete map —
+// corrections merged over what is already stored, not the corrections alone.
+async function ccWriteCorrections(){
   const stored = (cc.settings && cc.settings.tuned_chars) || {};
   const merged = {};
   for(let m = 0; m < cc.count; m++){
@@ -723,6 +1118,7 @@ async function ccApply(){
     }
     merged[key] = map;
   }
+  if(!Object.keys(merged).length) return true;
 
   try {
     const res  = await fetch('/restore_settings', {
@@ -732,22 +1128,30 @@ async function ccApply(){
     const data = await res.json();
     if(data.status !== 'success') throw new Error(data.message || 'Write rejected');
   } catch(err){
-    btn.disabled = false;
-    btn.textContent = 'Apply Corrections';
     showToast('Write failed: ' + err.message, 'error');
-    return;
+    return false;
   }
 
-  // Storage on this hardware drops writes quietly. Read the modules back and
-  // say whether they actually kept what we just sent.
-  btn.textContent = 'Verifying…';
+  // What we just wrote is now what is stored, so the next pass measures
+  // against it rather than against the tuning we started with.
+  for(const key of Object.keys(merged)){
+    if(!cc.settings.tuned_chars) cc.settings.tuned_chars = {};
+    cc.settings.tuned_chars[key] = merged[key];
+  }
+  await ccAudit(Object.keys(merged).map(Number));
+  return true;
+}
+
+// Storage on this hardware drops writes quietly. Read the modules back and
+// say whether they actually kept what we just sent.
+async function ccAudit(ids){
   const audit = document.getElementById('ccAudit');
   audit.style.display = 'block';
   audit.textContent = 'Reading the modules back…';
   try {
     const res  = await fetch('/module_audit', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ids: Object.keys(merged).map(Number) }),
+      body: JSON.stringify({ ids: ids }),
     });
     const data = await res.json();
     if(data.error) throw new Error(data.error);
@@ -755,15 +1159,39 @@ async function ccApply(){
     audit.innerHTML = bad.length
       ? '<strong style="color:var(--orange)">' + bad.length + ' module(s) did not read back clean:</strong> ' +
         bad.map(x => x.id + ' (' + x.status + ')').join(', ') +
-        '<br><span style="color:#999">Write them again, or check them in the Hardware Inspector — a ' +
-        'dropped EEPROM write during motor draw looks exactly like this.</span>'
+        '<br><span style="color:#999">A dropped EEPROM write during motor draw looks exactly like ' +
+        'this. Another pass will rewrite them.</span>'
       : '<strong style="color:var(--green)">All written modules read back clean.</strong>';
   } catch(err){
     audit.innerHTML = '<span style="color:var(--orange)">Could not verify: ' + err.message + '</span>';
   }
+}
 
-  btn.textContent = 'Applied';
-  showToast('Corrections written');
+// Manual "Apply", for a single-pass run.
+async function ccApply(){
+  const btn = document.getElementById('ccApplyBtn');
+  btn.disabled = true;
+  btn.textContent = 'Writing…';
+  const ok = await ccWriteCorrections();
+  btn.textContent = ok ? 'Applied' : 'Apply Corrections';
+  if(!ok) btn.disabled = false;
+  else showToast('Corrections written — re-check to confirm they took');
+}
+
+// Read everything again without writing. The only thing that proves a
+// correction worked.
+async function ccRecheck(){
+  const btn = document.getElementById('ccRecheckBtn');
+  btn.disabled = true;
+  cc.abort = false;
+  cc.pass++;
+  ccShow('sweep');
+  await ccSweepPass();
+  cc.history.push(ccTotalWrong());
+  cc.outcome = ccTotalWrong() === 0 ? 'done' : 'exhausted';
+  ccRenderReview();
+  ccShow('review');
+  btn.disabled = false;
 }
 
 function ccRestart(){
