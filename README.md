@@ -245,6 +245,20 @@ to it. A module that needs it repeatedly has failing EEPROM and wants
 replacing. The switch at the top of the Provision card turns the whole thing
 off (`auto_reprovision` in settings.json).
 
+### settings.json
+
+`server/settings.json` holds every offset, calibration and tuned character for
+the whole display. It is gitignored, so unlike everything else on the Pi it
+exists in one place only — take a copy off the machine (Settings → Download
+Backup) rather than trusting the SD card with the only one.
+
+It is written by writing a new file, forcing it to disk and renaming it into
+place, so a power cut during a save leaves either the previous file or the new
+one and never half of one. The copy the rename displaces is kept as
+`settings.json.bak`, and a settings.json that will not parse falls back to it
+rather than starting from defaults — coming up on defaults would write those
+defaults over the real ones on the next save.
+
 The same text form reaches the display over MQTT, if the Home Assistant
 integration is enabled:
 

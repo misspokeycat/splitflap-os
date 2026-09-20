@@ -6,7 +6,9 @@ by name is safe.
 """
 
 import json
+import logging
 import os
+import tempfile
 
 
 # Where everything lives, derived from this file rather than the working
@@ -18,21 +20,51 @@ REPO_DIR = os.path.dirname(SERVER_DIR)
 
 CONFIG_PATH = os.environ.get(
     "SPLITFLAP_CONFIG", os.path.join(SERVER_DIR, "settings.json"))
+# The copy the last save displaced. settings.json is every offset,
+# calibration and tuned character for the whole display, and it is the one
+# thing on this machine that exists nowhere else — not in git, not upstream.
+BACKUP_PATH = CONFIG_PATH + ".bak"
 APPS_PATH = os.path.join(REPO_DIR, "apps")
 VERSION_FILE = os.path.join(REPO_DIR, "VERSION")
 
 DEFAULT_FLAP_CHARS = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$&()-+=;q:%\'.,/?*roygbpw"
 
 
+def _read_json(path):
+    """Parse one settings file, or None if it is missing or unreadable."""
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return None
+    except Exception as exc:
+        logging.error("Settings file %s could not be read: %s", path, exc)
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _read_stored_settings():
+    """What is on disk, falling back to the copy the last save displaced.
+
+    A truncated settings.json used to read as "no settings", which is not a
+    harmless answer: the server would come up on defaults and the next save
+    would write those defaults over the real ones. Losing the last change is
+    recoverable. Losing the calibration of 45 modules is not.
+    """
+    stored = _read_json(CONFIG_PATH)
+    if stored is not None:
+        return stored
+    stored = _read_json(BACKUP_PATH)
+    if stored is not None:
+        logging.warning(
+            "%s was unreadable; using the previous copy from %s",
+            CONFIG_PATH, BACKUP_PATH)
+    return stored
+
+
 def read_config_file():
     """Read settings.json best-effort, before load_settings() has run."""
-    if os.path.exists(CONFIG_PATH):
-        try:
-            with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {}
+    return _read_stored_settings() or {}
 
 
 def load_settings():
@@ -130,21 +162,68 @@ def load_settings():
             "word-clock", "moon-phase", "star-wars-quotes",
         ],
     }
-    if os.path.exists(CONFIG_PATH):
-        try:
-            with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                defaults.update(data)
-                if "tuned_chars" not in defaults:
-                    defaults["tuned_chars"] = {str(i): {} for i in range(45)}
-                return defaults
-        except:
-            pass
+    stored = _read_stored_settings()
+    if stored is not None:
+        defaults.update(stored)
+        if "tuned_chars" not in defaults:
+            defaults["tuned_chars"] = {str(i): {} for i in range(45)}
     return defaults
 
+
+def _fsync_directory(path):
+    """Make the rename durable, not only the bytes it renamed into place.
+
+    Without it a crash can lose the directory entry and bring back the
+    previous file. That is still a whole file rather than half of one, so it
+    is a lesser failure than the one below — but it is the difference between
+    losing the last save and not. Directories cannot be opened this way on
+    Windows, where the suite runs.
+    """
+    try:
+        handle = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(handle)
+    except OSError:
+        pass
+    finally:
+        os.close(handle)
+
+
 def save_settings(data):
-    with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=4)
+    """Replace settings.json atomically, keeping the copy it displaced.
+
+    This used to truncate the live file and write into it. A power cut partway
+    through left it empty or half-written — and this display browns out: it is
+    full of stepper motors that draw hardest exactly when a write lands, which
+    is the same reason the modules lose their EEPROM.
+
+    So the new settings go to a separate file, get forced to the disk rather
+    than left in the page cache, and are swapped in with a rename, which is
+    atomic. A crash at any point during this leaves either the previous file
+    or the new one, never a partial one.
+    """
+    directory = os.path.dirname(CONFIG_PATH) or '.'
+    handle, temp_path = tempfile.mkstemp(
+        dir=directory, prefix='.settings-', suffix='.tmp')
+    try:
+        with os.fdopen(handle, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=4)
+            f.flush()
+            os.fsync(f.fileno())
+        if os.path.exists(CONFIG_PATH):
+            os.replace(CONFIG_PATH, BACKUP_PATH)
+        os.replace(temp_path, CONFIG_PATH)
+    except BaseException:
+        # Leaving the half-written temp file behind would litter the directory
+        # with one per failed save, and the live file is untouched either way.
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+        raise
+    _fsync_directory(directory)
 
 settings = load_settings()
 
