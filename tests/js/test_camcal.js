@@ -12,10 +12,14 @@ const src = fs.readFileSync(
 const grab = name => {
   const i = src.indexOf(`function ${name}(`);
   if (i < 0) throw new Error(`${name} not found in camcal.js`);
+  // An async function is found by its `function` keyword, so take the
+  // modifier with it — dropping it leaves the body's `await` inside a plain
+  // function, which does not parse.
+  const start = src.slice(0, i).endsWith('async ') ? i - 'async '.length : i;
   let depth = 0, started = false;
   for (let j = i; j < src.length; j++) {
     if (src[j] === '{') { depth++; started = true; }
-    else if (src[j] === '}') { depth--; if (started && depth === 0) return src.slice(i, j + 1); }
+    else if (src[j] === '}') { depth--; if (started && depth === 0) return src.slice(start, j + 1); }
   }
   throw new Error(`${name} is unbalanced`);
 };
@@ -34,7 +38,7 @@ const controls = { ccMinConf: { value: '60' }, ccMaxFlaps: { value: '2' },
 
 const code = ['ccSolveH', 'ccGauss', 'ccApplyH', 'ccScaleH', 'ccCellQuad', 'ccScoreReads',
               'ccCornerModules', 'ccCornerCentres', 'ccOtsu', 'ccFindBlobs', 'ccStepSize',
-              'ccWrapStep', 'ccCorrelate', 'ccMatch', 'ccReadsFrom']
+              'ccWrapStep', 'ccCorrelate', 'ccMatch', 'ccReadsFrom', 'ccBehindSeen']
   .map(grab).join('\n');
 const api = new Function(
   'cc', 'document', 'getCharMap', 'getFlapCount',
@@ -45,7 +49,7 @@ const api = new Function(
   '\n' + (src.match(/^const CC_[A-Z_]+\s*=\s*[^;'"`]+;/gm) || []).join('\n') +
   '; return {ccSolveH, ccApplyH, ccScaleH, ccCellQuad, ccScoreReads,' +
          ' ccCornerModules, ccCornerCentres, ccOtsu, ccFindBlobs, ccStepSize, ccWrapStep,' +
-         ' ccCorrelate, ccMatch, ccReadsFrom};'
+         ' ccCorrelate, ccMatch, ccReadsFrom, ccBehindSeen};'
 )(
   cc,
   { getElementById: id => controls[id] },
@@ -295,6 +299,7 @@ check('a faint difference still splits', split(6, 30), true);
 // orthogonal, every match would look confident, and the test would prove
 // nothing about the situation this has to cope with.
 const LEN = 512, SHARED = Math.sqrt(0.5);
+const CC_ON_FLAP_VALUE = parseFloat(src.match(/^const CC_ON_FLAP\s*=\s*([\d.]+)/m)[1]);
 function noise(seed) {
   const f = new Float64Array(LEN);
   let state = seed * 9301 + 49297;
@@ -338,17 +343,197 @@ const ahead = api.ccReadsFrom({ 10: { 0: unseen } }, visited, 10);
 check('a module matching nothing seen is taken to be ahead', ahead[0].index, 11);
 check('and is marked as inferred', ahead[0].assumed, true);
 
-// The inference has to turn into a nudge backwards, or it changes nothing.
+check('and claims no confidence, because it has none', ahead[0].conf, 0);
+
+// The inference has to turn into a nudge backwards, or it changes nothing —
+// and it has to survive the confidence filter on its way there. It used to
+// claim conf 100 to get through, which meant every module the camera could
+// not read arrived at the same place wearing the same certainty.
 reset();
-api.ccScoreReads(10, readsOf({ 0: { index: 11, char: CHAR_MAP[11], conf: 100, assumed: true } }),
+api.ccScoreReads(10, readsOf({ 0: { index: 11, char: CHAR_MAP[11], conf: 0, assumed: true } }),
                  positions);
 check('being ahead is scored as one flap ahead', cc.results[0][10].err, 1);
 check('and nudges back, not forward', cc.results[0][10].to, FROM - NUDGE);
 check('and is recorded as inferred', cc.results[0][10].assumed, true);
 
+// The same reading without the inference flag is exactly what the filter is
+// for, and is dropped.
+reset();
+api.ccScoreReads(10, readsOf({ 0: { index: 11, char: CHAR_MAP[11], conf: 0 } }), positions);
+check('a matched read with no confidence is still discarded', cc.results[0], undefined);
+
 // With no reference for the commanded flap there is nothing to say yet.
 check('nothing is guessed before the flap has been seen',
       api.ccReadsFrom({ 12: { 0: unseen } }, visited, 12)[0], null);
 
-console.log(failures ? `\n${failures} failure(s)` : '\nall checks passed');
-process.exit(failures ? 1 : 0);
+// ── Where the inference does not hold ──────────────────────
+//
+// "It matches nothing seen, so it is on a flap still to come" needs the
+// flaps it could be behind on to have been seen. Early in a sweep they have
+// not been, and flap 0 — the blank — is never swept at all, so the opening
+// positions of every pass called each wrong module ahead whatever it was
+// really showing and nudged the ones that were behind further the wrong way.
+check('the flaps behind are covered when they all have references',
+      api.ccBehindSeen(10, FLAPS, visited, 2), true);
+check('and are not when the sweep has not reached back that far',
+      api.ccBehindSeen(9, FLAPS, visited, 2), false);
+
+const early = { 9: vec(9), 10: vec(10) };      // flap 8 not yet visited
+check('nothing is inferred while a flap it could be behind on is unseen',
+      api.ccReadsFrom({ 10: { 0: unseen } }, early, 10)[0], null);
+
+// A cell the camera cannot read looks like no flap at all. A module one flap
+// ahead still looks like a flap — same window, same frame, same background.
+// Only the second one is evidence of anything, and the difference matters
+// because the inference ends in an EEPROM write.
+const blind = (() => {
+  const f = new Float64Array(LEN);
+  for (let i = 0; i < LEN; i++) f[i] = ((i * 37) % 11) - 5;   // unrelated to any flap
+  let mean = 0; for (let i = 0; i < LEN; i++) mean += f[i];
+  mean /= LEN;
+  let ss = 0; for (let i = 0; i < LEN; i++) { f[i] -= mean; ss += f[i] * f[i]; }
+  const inv = 1 / Math.sqrt(ss);
+  for (let i = 0; i < LEN; i++) f[i] *= inv;
+  return f;
+})();
+check('an unreadable cell looks like nothing',
+      Math.abs(api.ccCorrelate(blind, visited[10])) < 0.2, true);
+check('and is left unread rather than nudged',
+      api.ccReadsFrom({ 10: { 0: blind } }, visited, 10)[0], null);
+
+// A weak best match to the flap it was sent to is a poor look at the right
+// flap, not proof of being on the next one. Asserting "ahead" here wrote a
+// correction to a module that was where it belonged.
+const murky = (() => {
+  const f = new Float64Array(LEN), other = vec(77);
+  for (let i = 0; i < LEN; i++) f[i] = 0.25 * visited[10][i] + 0.75 * other[i];
+  let mean = 0; for (let i = 0; i < LEN; i++) mean += f[i];
+  mean /= LEN;
+  let ss = 0; for (let i = 0; i < LEN; i++) { f[i] -= mean; ss += f[i] * f[i]; }
+  const inv = 1 / Math.sqrt(ss);
+  for (let i = 0; i < LEN; i++) f[i] *= inv;
+  return f;
+})();
+const ownScore = api.ccCorrelate(murky, visited[10]);
+check('the premise: too poor to call it on its flap', ownScore < CC_ON_FLAP_VALUE, true);
+check('the premise: but still more like its own flap than any other',
+      ownScore > Math.max(api.ccCorrelate(murky, visited[9]),
+                          api.ccCorrelate(murky, visited[8])), true);
+const weak = api.ccReadsFrom({ 10: { 0: murky } }, visited, 10);
+check('a weak look at its own flap is not read as being ahead', weak[0].index, 10);
+check('and nothing is inferred about it', weak[0].assumed, false);
+
+// ── Nudging the same flap more than once ───────────────────
+//
+// A nudge is deliberately smaller than a flap, so a module past the boundary
+// generally needs more than one. That only works if each attempt measures
+// from where the module now is. `from` comes from cc.positions, which was
+// read once before the first correction and never updated — so every attempt
+// recomputed the same target from the same stale origin. The loop wrote the
+// identical step six times, moved the module once, and called the flap
+// stuck: the opposite of what nudging repeatedly was for, and invisible from
+// outside, because every one of those writes succeeded.
+//
+// Driven through the real loop rather than the arithmetic alone. The bug was
+// never in what one reading computes; it was in what the next reading is
+// computed from.
+
+const FIX_AT = 10;
+const sim = { trueStep: 570, at: 640, writes: [], posts: 0, refuse: false };
+
+async function ccPost(url, body) {
+  if (url === '/apply_tuning') {
+    sim.posts++;
+    if (sim.refuse) return { ok: false, data: { error: 'flap 10 would sit 3 steps from flap 11' } };
+    for (const m of Object.keys(body.tuned)) {
+      for (const i of Object.keys(body.tuned[m])) sim.writes.push(body.tuned[m][i]);
+    }
+    return { ok: true, data: { status: 'success' } };
+  }
+  if (url === '/custom_tune') { sim.at = body.step; return { ok: true, data: {} }; }
+  return { ok: true, data: {} };
+}
+
+// What the camera would see, given where the module is actually parked.
+function ccRereadPosition(idx) {
+  const shown = FIX_AT + Math.round((sim.at - sim.trueStep) / (CAL / FLAPS));
+  loop.ccScoreReads(idx, [{ index: shown, char: CHAR_MAP[shown], conf: 95 }],
+                    cc.positions[idx] || {});
+  return Promise.resolve(true);
+}
+
+const ccStatus = () => {};
+
+const loop = new Function(
+  'cc', 'document', 'getCharMap', 'getFlapCount', 'ccPost', 'ccRereadPosition', 'ccStatus',
+  ['ccFixPosition', 'ccStuckModules', 'ccWrongAt', 'ccCorrectionsAt', 'ccNoteWritten',
+   'ccMoveTo', 'ccScoreReads', 'ccWrapStep', 'ccStepSize'].map(grab).join('\n') +
+  '\n' + (src.match(/^const CC_[A-Z_]+\s*=\s*[^;'"`]+;/gm) || []).join('\n') +
+  '; return {ccFixPosition, ccScoreReads};'
+)(
+  cc,
+  { getElementById: id => controls[id] },
+  () => CHAR_MAP,
+  () => FLAPS,
+  ccPost,
+  ccRereadPosition,
+  ccStatus
+);
+
+// One module, so the counts in the report read as themselves.
+cc.count = 1;
+
+const startFix = () => {
+  reset();
+  sim.at = 640; sim.writes = []; sim.posts = 0; sim.refuse = false;
+  cc.positions = { [FIX_AT]: { '0': { active: 640, expected: 640, tuned: null } } };
+  return ccRereadPosition(FIX_AT);
+};
+
+(async () => {
+  const note = { textContent: '' };
+
+  // Seventy steps out: one nudge of twenty-five is not enough, two are.
+  await startFix();
+  check('the module starts a flap ahead of where it was sent', cc.results[0][FIX_AT].err, 1);
+  let out = await loop.ccFixPosition(FIX_AT, note);
+  check('each nudge starts where the last one left off, so the flap comes right',
+        out.fixed, true);
+  check('in two nudges, not one', out.attempts, 2);
+  check('and each write moves on from the one before',
+        JSON.stringify(sim.writes), JSON.stringify([615, 590]));
+  check('leaving nothing wrong at that position', out.left, 0);
+
+  // What was written is what the next reading has to measure from.
+  check('the stored position is carried forward as it is written',
+        cc.positions[FIX_AT]['0'].active, 590);
+
+  // A flap already right costs nothing — no write, no move, no wear.
+  await startFix();
+  sim.trueStep = 640;
+  await ccRereadPosition(FIX_AT);
+  out = await loop.ccFixPosition(FIX_AT, note);
+  check('a flap already right is not written to', sim.writes.length, 0);
+  check('and needs no attempts', out.attempts, 0);
+  check('and is reported fixed', out.fixed, true);
+  sim.trueStep = 570;
+
+  // A refused write is the sequence check saying this is a misread rather
+  // than a correction. Stop, and say which flap and why — naming it on the
+  // spot is the point of correcting during the sweep, and the report was
+  // being collected and then thrown away.
+  await startFix();
+  sim.refuse = true;
+  out = await loop.ccFixPosition(FIX_AT, note);
+  check('a refused write is not tried again', sim.posts, 1);
+  check('and no nudge is counted, because none landed', out.attempts, 0);
+  check('and it is not reported as fixed', out.fixed, false);
+  check('and carries the reason it was refused', /would sit/.test(out.refused), true);
+  check('and names the flap', out.char, CHAR_MAP[FIX_AT]);
+  check('and the module still showing the wrong thing', out.modules.length, 1);
+  check('by id', out.modules[0].id, 0);
+  check('with what it showed instead', out.modules[0].read, CHAR_MAP[FIX_AT + 1]);
+
+  console.log(failures ? `\n${failures} failure(s)` : '\nall checks passed');
+  process.exit(failures ? 1 : 0);
+})();

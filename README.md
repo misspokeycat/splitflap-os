@@ -120,59 +120,47 @@ correction derived from it.
 
 ### How a correction is made
 
-The way Auto Fine-Tune does it by hand, one flap at a time, during the sweep
-rather than after it.
+One flap at a time, during the sweep rather than after it — the way Auto
+Fine-Tune does it by hand.
 
-At each position the display is photographed once. The reference for that
-flap is the middle of what the whole display is showing right now, so it is
-ready the moment the frame is — nothing has to wait for the rest of the
-sweep. Any module not on that flap is corrected, moved, and that position is
-photographed again, before the sweep moves on. A flap that will not come
-right is named on the spot.
+At each position the display is photographed once, and the reference for that
+flap is the middle of what the whole display is showing. Any module not on
+that flap is nudged, moved, and photographed again before the sweep moves on,
+repeating until the flap comes right, a write is refused, or six attempts are
+used up. Each nudge starts from where the last one left the module.
 
-Because corrections happen as the sweep goes, the only references that exist
-are for flaps already visited. A module one flap *behind* is showing one of
-those and is recognised outright. A module one flap *ahead* is showing a flap
-nothing has been learnt about yet, so it matches nothing — and matching
-nothing is itself the answer: the flap it is on must be one still to come.
-It is taken to be ahead, nudged back, and looked at again.
+The flap a module is showing says which way to move, not how far, so a nudge
+is a fraction of a flap — 25 steps by default, the figure Auto Fine-Tune
+applies per click. Moving a whole flap overshoots almost every time.
 
-Whether a module is on the flap it was sent to is decided by how well it
-matches that flap's own reference, not by which reference it matches best.
-On a capture of all 63 flaps the correlation with the commanded flap had a
-median of 0.965 when the module was on it and 0.525 when it was not, so the
-threshold sits at 0.70 — calling 0.3% of correct modules wrong and spotting
-81% of the ones that are not where they were sent.
+Controls on the sweep screen:
 
-**The flap that is showing says which way to move, not how far.** A module on
-the wrong flap is somewhere past the boundary — it might be five steps over,
-it might be forty — so it is nudged 25 steps and looked at again, the same
-figure Auto Fine-Tune applies per click. Moving it a whole flap overshoots
-almost every time and lands it a flap out the other way.
+| Control | Effect |
+|---|---|
+| **Auto-correct** | Off reads and reports without writing anything |
+| **Nudge size** | Steps per correction, default 25 |
+| **Min confidence** | How clearly a match must beat the runner-up to count as a reading |
+| **Max flaps** | Largest error believed to be real; anything further out is treated as a misread |
 
-A reel turns one way, so the two directions do not cost the same. Nudging
-forward is a few steps; nudging back means going almost all the way round,
-which takes seconds. Two things had to change for that to work at all: the
-step space is treated as the loop it is, so a nudge back past step 0 wraps to
-the end of the reel rather than stopping at zero, and a re-read now waits for
-the move to *begin* before waiting for it to finish — the frames that mean
-"settled" can otherwise all happen before a long move has started, and the
-photograph is then of the position from before the nudge.
+A module that is one flap *ahead* is showing a flap the sweep has not reached,
+so it matches no reference. Where nothing else explains that, it is taken to be
+ahead and nudged back. Where something else might — the sweep has not yet
+covered the flaps it could be behind on, the cell is too dark or obscured to
+look like any flap, or its best match is a weak one to the flap it was sent
+to — it is left unread instead. Readings reached this way are marked inferred
+in the review and in the capture manifest.
 
-Every write is checked against the reel before it lands. A reel turns one
-way, so a module's positions have to climb round it in order and come back to
-the start after exactly one revolution; nothing mechanical moves a flap past
-its neighbour. The bounds allow a couple of nudges at one flap and refuse
-anything approaching a whole one — at that point the flaps would be sitting
-on each other, and what the module has is a home offset, which is one number
-for the whole reel rather than a correction to one position on it. A write
-that breaks the order comes back 409. Only problems a write *introduces* are
-refused, so a module already carrying a bad sequence stays fixable.
+Every write is checked against the reel before it lands: a module's positions
+have to climb round in order and come back to the start after one revolution,
+and nothing mechanical moves a flap past its neighbour. A write that breaks
+that order comes back **409** naming the flap and how far out it is, and the
+run stops correcting that position. In practice it means the module needs its
+home offset moved rather than one position nudged. Only problems a write
+*introduces* are refused, so a module already carrying a bad sequence stays
+fixable.
 
-Corrections are whole flaps nowhere. Finer-than-a-nudge adjustment was tried
-and dropped: on a capture sweeping all 63 flaps, a module's sub-flap lean
-agreed with its own average only 54% of the time against a 50% coin flip, so
-there was nothing there to correct toward.
+The review lists any flap that would not come right, with the modules still
+wrong and what each showed instead.
 
 To turn a session into a regression test, unzip it into
 `tests/fixtures/captures/<name>/`. `tests/js/test_captures.js` picks up any

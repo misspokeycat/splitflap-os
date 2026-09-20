@@ -30,7 +30,6 @@ const CC_NOISE_GAIN     = 3.0;
 const CC_NOISE_MIN      = 2.0;
 const CC_CELL_INSET     = 0.14;  // trim each cell toward its centre, away from bezels
 const CC_PREVIEW_MS     = 50;    // live overlay redraw interval
-const CC_MAX_PASSES     = 4;     // ceiling on write/re-read rounds
 const CC_CONFIRM_WAIT_MS = 1500; // let the modules finish committing before reading back
 const CC_CONFIRM_TRIES  = 3;     // how many times to wait for them
 const CC_FIX_TRIES      = 6;     // nudges allowed at one position before giving up
@@ -167,6 +166,7 @@ function ccDumpFinish(){
   cc.dump.manifest.threshold  = cc.threshold;
   cc.dump.manifest.truncated  = !!cc.dump.full;
   cc.dump.manifest.history    = cc.history;
+  cc.dump.manifest.fixes      = cc.fixes;
   cc.dump.manifest.outcome    = cc.outcome;
   cc.dump.manifest.video      = cc.video
     ? { width: cc.video.videoWidth, height: cc.video.videoHeight } : null;
@@ -987,6 +987,17 @@ const CC_TPL_ALIKE = 0.93;  // two references this similar cannot be told apart
 // the median is 0.525. At 0.70 this calls 0.3% of correct cells wrong and
 // spots 81% of the ones that are not where they were sent.
 const CC_ON_FLAP = 0.70;
+// And a floor under "it looks like some flap at all". Two cells of the same
+// display photographed at the same position share a window, a frame and a
+// background, so even the wrong flap correlates about 0.525. A cell that is
+// dark, blown out or has something in front of it correlates with nothing,
+// and it is that cell — not a module one flap ahead — that has to stay out
+// of the inference below, because the inference ends in a write.
+//
+// A guard rather than a tuned threshold: it is set well under the measured
+// off-flap median, and a capture with genuinely unreadable cells in it is
+// what would sharpen it.
+const CC_ANY_FLAP = 0.20;
 // One length for features and references alike. They are compared element by
 // element, so the two drifting apart reads off the end of the shorter one and
 // every correlation comes back NaN.
@@ -1101,33 +1112,43 @@ function ccMatch(feature, templates){
   // rather than pick, because the answer becomes an EEPROM write.
   if(secondIdx >= 0 &&
      ccCorrelate(templates[bestIdx], templates[secondIdx]) > CC_TPL_ALIKE){
-    return { index: bestIdx, margin: 0, conf: 0, alike: secondIdx };
+    return { index: bestIdx, score: best, margin: 0, conf: 0, alike: secondIdx };
   }
   const margin = second > -2 ? best - second : 1;
   return {
     index: bestIdx,
+    // How like that flap it is, as against how much more like it than the
+    // runner-up. A thin margin between two poor matches and a thin margin
+    // between two good ones are not the same thing.
+    score: best,
     margin: margin,
     conf: Math.max(0, Math.min(100, Math.round(margin * CC_TPL_CONF))),
   };
 }
 
-// Present a match the way ccScoreReads already expects a reading, so the
-// correction arithmetic downstream is unchanged.
+// Have the flaps this module could plausibly be *behind* on all been seen?
+// ccScoreReads bounds a believable error at ccMaxFlaps, so those are the
+// ones that have to be covered before "it matches nothing seen" can mean
+// anything. At the start of a sweep they are not, and flap 0 — the blank —
+// is never swept at all.
+function ccBehindSeen(idx, flaps, templates, maxFlaps){
+  for(let k = 1; k <= maxFlaps; k++){
+    if(!templates[(idx - k + flaps) % flaps]) return false;
+  }
+  return true;
+}
+
 // What flap each module is believed to be on.
 //
-// Corrections happen as the sweep goes, so the only references that exist
-// are for flaps already visited. A module that is *behind* is showing one of
-// those and is recognised outright. A module that is *ahead* is showing a
-// flap nothing has been learnt about yet, so it matches nothing — and it
-// used to be filed as unreadable and left alone. That is why a V showing W
-// was never corrected while a V showing U always was.
-//
-// Matching nothing is itself the answer. If a module does not look like the
-// flap it was sent to, and does not look like any flap already seen, the
-// flap it is on must be one still to come: it is ahead. Nudge it back and
-// look again, which is what the re-read is for.
+// Corrections happen as the sweep goes, so the only references that exist are
+// for flaps already visited. A module *behind* is showing one of those and is
+// recognised outright. A module *ahead* is showing a flap nothing has been
+// learnt about yet, so it matches nothing — and where nothing else explains
+// matching nothing, that is the answer: the flap it is on is one still to
+// come, so nudge it back and look again.
 function ccReadsFrom(samples, templates, idx){
-  const minConf = parseInt(document.getElementById('ccMinConf').value) || 0;
+  const minConf  = parseInt(document.getElementById('ccMinConf').value)  || 0;
+  const maxFlaps = parseInt(document.getElementById('ccMaxFlaps').value) || 2;
   const reads = new Array(cc.count).fill(null);
   const at = samples[idx] || {};
   const ownTemplate = templates[idx];
@@ -1152,9 +1173,16 @@ function ccReadsFrom(samples, templates, idx){
     } else if(confident && hit.index !== idx){
       index = hit.index;               // recognised as a flap already seen
       conf = hit.conf;
-    } else if(ownTemplate){
-      index = (idx + 1) % flaps;       // ahead, by the argument above
-      conf = 100;
+    } else if(ownTemplate && hit && hit.index !== idx &&
+              hit.score >= CC_ANY_FLAP &&
+              ccBehindSeen(idx, flaps, templates, maxFlaps)){
+      // Ahead — but only where the alternatives are ruled out: the flaps it
+      // could be behind on have references, it looks like some flap rather
+      // than like nothing at all, and its best match is not the flap it was
+      // sent to. Confidence stays 0 because this is a deduction from what a
+      // cell does not look like, not a reading of what it does.
+      index = (idx + 1) % flaps;
+      conf = 0;
       assumed = true;
     } else if(confident){
       index = hit.index;
@@ -1294,7 +1322,7 @@ async function ccRunUntilClean(){
   const stuck = cc.fixes.filter(f => !f.fixed);
   cc.history.push(ccTotalWrong());
   cc.outcome = cc.abort ? 'stopped'
-             : !correct ? (ccTotalWrong() === 0 ? 'done' : 'exhausted')
+             : !correct ? (ccTotalWrong() === 0 ? 'done' : 'measured')
              : stuck.length ? 'some-stuck'
              : 'done';
   return ccFinishRun();
@@ -1387,19 +1415,31 @@ function ccWrongAt(idx){
   return n;
 }
 
+// Which modules are still not where they were sent, and what they showed
+// instead. Naming them on the spot is the point of correcting during the
+// sweep; they were being counted and then thrown away.
+function ccStuckModules(idx){
+  const out = [];
+  for(let m = 0; m < cc.count; m++){
+    const scored = (cc.results[m] || {})[idx];
+    if(scored && scored.err !== 0){
+      out.push({ id: m, read: scored.read, err: scored.err,
+                 assumed: !!scored.assumed });
+    }
+  }
+  return out;
+}
+
 // Fix one position and prove it. Returns what happened, for the report.
 async function ccFixPosition(idx, note){
-  for(let attempt = 1; attempt <= CC_FIX_TRIES; attempt++){
-    const wrong = ccWrongAt(idx);
-    if(!wrong){
-      ccStatus('');
-      return { idx: idx, fixed: true, attempts: attempt - 1 };
-    }
+  const char = getCharMap(0)[idx];
+  let attempt = 0, refused = null;
 
+  for(; attempt < CC_FIX_TRIES && ccWrongAt(idx); attempt++){
     const { tuned, moves } = ccCorrectionsAt(idx);
-    const progress = 'Flap "' + getCharMap(0)[idx] + '": nudging ' + wrong +
-                     ' module(s) by ' + ccStepSize() + ' steps, attempt ' + attempt +
-                     ' of ' + CC_FIX_TRIES;
+    const progress = 'Flap "' + char + '": nudging ' + moves.length +
+                     ' module(s) by ' + ccStepSize() + ' steps, attempt ' +
+                     (attempt + 1) + ' of ' + CC_FIX_TRIES;
     note.textContent = progress + '…';
     ccStatus(progress);          // and over the live view, which is what you watch
 
@@ -1407,22 +1447,39 @@ async function ccFixPosition(idx, note){
     if(!write.ok){
       // A refused write is the sequence check saying this is a misread
       // rather than a correction. Do not keep trying it.
-      return { idx: idx, fixed: false, refused: write.data.error || 'write refused' };
+      refused = write.data.error || 'write refused';
+      break;
     }
-    ccNoteWritten(tuned);
+    ccNoteWritten(idx, tuned);
 
-    note.textContent = 'Flap "' + getCharMap(0)[idx] + '": checking…';
+    note.textContent = 'Flap "' + char + '": checking…';
     await ccMoveTo(moves, idx);
-    if(!await ccRereadPosition(idx)){
-      return { idx: idx, fixed: false, refused: 'the reels never stopped' };
-    }
+    if(!await ccRereadPosition(idx)){ refused = 'the reels never stopped'; break; }
   }
-  return { idx: idx, fixed: ccWrongAt(idx) === 0, attempts: CC_FIX_TRIES };
+
+  ccStatus('');
+  const left = ccWrongAt(idx);
+  return { idx: idx, char: char, fixed: !refused && left === 0, attempts: attempt,
+           left: left, refused: refused, modules: ccStuckModules(idx) };
 }
 
-// Keep our copy of settings in step with what was just written, so the next
-// position measures against it rather than against what we started with.
-function ccNoteWritten(tuned){
+// Keep our copy of the display's positions in step with what was just
+// written, so the next look at this flap measures from where the module now
+// is rather than from where it started.
+//
+// This is what made a second nudge possible. `from` in ccScoreReads comes
+// from cc.positions, which was read once before the first correction and
+// never updated — so every attempt recomputed the same target from the same
+// stale origin, wrote the identical step six times, and reported the flap
+// stuck. Anything needing more than one nudge could never come right.
+function ccNoteWritten(idx, tuned){
+  const at = cc.positions[idx] || (cc.positions[idx] = {});
+  for(const key of Object.keys(tuned)){
+    const step = tuned[key][String(idx)];
+    if(step === undefined) continue;
+    const pos = at[key] || (at[key] = {});
+    pos.tuned = pos.active = step;
+  }
   if(!cc.settings) return;
   if(!cc.settings.tuned_chars) cc.settings.tuned_chars = {};
   for(const key of Object.keys(tuned)){
@@ -1465,6 +1522,10 @@ function ccDumpReadings(){
       mod.read     = scored ? scored.read : (live.char || null);
       mod.matched  = scored ? scored.matched : null;
       mod.conf     = scored ? scored.conf : null;
+      // What the inference rested on, so a wrong one can be read back out of
+      // the capture rather than argued about.
+      mod.assumed  = scored ? !!scored.assumed : null;
+      mod.own      = scored ? scored.own : null;
       mod.err      = scored ? scored.err  : null;
       mod.from     = scored ? scored.from : null;
       mod.to       = scored ? scored.to   : null;
@@ -1492,7 +1553,11 @@ function ccScoreReads(idx, reads, positions){
     const readIdx = !r ? -1
       : (r.index !== undefined ? r.index : (r.char ? map.indexOf(r.char) : -1));
 
-    if(readIdx < 0 || !r || r.conf < minConf){
+    // The confidence filter is about how good a match is. An inferred flap
+    // is not a match and has no confidence to offer, so it is judged by the
+    // conditions ccReadsFrom drew it under rather than by a number — which
+    // is why it no longer claims one.
+    if(readIdx < 0 || !r || (!r.assumed && r.conf < minConf)){
       cc.unread[m] = (cc.unread[m] || 0) + 1;
       cc.live[m] = { char: r && r.char ? r.char : '?' };
       continue;
@@ -1589,15 +1654,14 @@ function ccAbortSweep(){
 
 // ── Review ─────────────────────────────────────────────────
 
+// Only the states a run can now actually end in. Correcting moved into the
+// sweep, and the outcomes belonging to the write-at-the-end flow it replaced
+// stayed behind describing a pass that no longer exists.
 const CC_OUTCOME = {
-  'done':         ['var(--green)',  'Every module read correctly at every position checked.'],
-  'exhausted':    ['var(--orange)', 'Stopped at the pass limit with corrections still outstanding.'],
-  'stuck':        ['var(--orange)', 'The last pass was no better than the one before it, so it stopped rather than write again. What is left is likely mechanical, or a module the camera cannot read.'],
-  'write-failed': ['var(--red)',    'A write failed; nothing further was attempted.'],
-  'write-pending': ['var(--orange)', 'The corrections were sent but some modules did not read them back. Reading the display again now would measure a half-written state, so it stopped instead.'],
-  'some-stuck':   ['var(--orange)', 'Some flaps would not come right. Each was corrected and re-read on the spot, so what is left is the part a correction does not fix — a module the camera cannot read, or something mechanical.'],
-  'stopped':      ['var(--orange)', 'Stopped part way. Everything corrected before that point was checked on the spot and holds.'],
-  'unverified':   ['var(--orange)', 'The corrections were sent but could not be read back, so there is no evidence they landed. Nothing further was attempted.'],
+  'done':       ['var(--green)',  'Every module read correctly at every position checked.'],
+  'measured':   ['var(--orange)', 'Read without correcting anything. What is listed below is what a run with Auto-correct on would try to nudge.'],
+  'some-stuck': ['var(--orange)', 'Some flaps would not come right. Each was corrected and re-read on the spot, so what is left is the part a correction does not fix — a module the camera cannot read, or something mechanical.'],
+  'stopped':    ['var(--orange)', 'Stopped part way. Everything corrected before that point was checked on the spot and holds.'],
 };
 
 function ccRenderReview(){
@@ -1634,9 +1698,37 @@ function ccRenderReview(){
   }
 
   ccRenderHistory();
+  ccRenderStuck();
   ccRenderSystemic();
   document.getElementById('ccApplyBtn').disabled = (totalFixes === 0);
   document.getElementById('ccRecheckBtn').disabled = false;
+}
+
+// The flaps that would not come right, and what they did instead. Each was
+// nudged and re-read on the spot, so this is the residue a correction does
+// not reach — and it is the first thing you want when a run ends short.
+function ccRenderStuck(){
+  const el = document.getElementById('ccStuck');
+  if(!el) return;
+  const stuck = cc.fixes.filter(f => !f.fixed);
+  if(!stuck.length){ el.style.display = 'none'; return; }
+  el.style.display = 'block';
+
+  const line = f => {
+    const who = f.modules.map(x =>
+      x.id + (x.read ? ' showed "' + x.read + '"' : ' unreadable') +
+      (x.assumed ? ' (inferred)' : '')).join(', ');
+    const why = f.refused ? f.refused
+              : 'still wrong after ' + f.attempts + ' nudge' + (f.attempts === 1 ? '' : 's');
+    return '<li>Flap "' + f.char + '" (index ' + f.idx + ') — ' + why +
+           (who ? '<br><span style="color:#999">' + who + '</span>' : '') + '</li>';
+  };
+
+  el.innerHTML =
+    '<strong style="color:var(--orange)">' + stuck.length + ' flap' +
+    (stuck.length === 1 ? '' : 's') + ' would not come right:</strong>' +
+    '<ul style="margin:6px 0 0 18px;padding:0;font-size:.8rem;line-height:1.7">' +
+    stuck.map(line).join('') + '</ul>';
 }
 
 // A module wrong by the same amount everywhere has a home-offset problem, not
