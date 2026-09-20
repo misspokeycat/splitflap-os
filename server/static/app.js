@@ -2041,10 +2041,45 @@ function createSearchChipPicker({container, hiddenId, searchUrl, resultKey, maxI
 // ============================================================
 //  TUNING TAB
 // ============================================================
+// Where flap positions come from. Module EEPROM is written while the motors
+// are drawing and this display has lost tuning to that more than once;
+// settings.json is written atomically and kept backed up. Sending the motor
+// step means the modules have nothing to remember.
+function renderPositionSource(){
+  const btn = document.getElementById('posSourceBtn');
+  if(!btn || !globalSettings) return;
+  const server = globalSettings.position_source === 'server';
+  btn.textContent = 'POSITIONS: ' + (server ? 'SERVER' : 'MODULE');
+  btn.title = server
+    ? 'The server sends each module the motor step, from settings.json. Module EEPROM tuning is not used and not written.'
+    : 'Each module looks up the step in its own EEPROM. Click to hold positions on the server instead.';
+  btn.style.background = server ? '#0d7a6f' : '';
+  btn.style.color = server ? '#fff' : '';
+}
+
+async function togglePositionSource(){
+  const server = !(globalSettings && globalSettings.position_source === 'server');
+  if(server && !confirm(
+      'Hold flap positions on the server?\n\n' +
+      'Each page will send the motor step instead of the character, taken from ' +
+      'settings.json. Module EEPROM tuning stops being used — and stops being ' +
+      'written, which is the point.\n\n' +
+      'Your modules keep whatever they already hold, so switching back changes ' +
+      'nothing else.')) return;
+  await fetch('/settings', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({action: 'save_global', position_source: server ? 'server' : 'module'}),
+  });
+  if(globalSettings) globalSettings.position_source = server ? 'server' : 'module';
+  renderPositionSource();
+  showToast(server ? 'Positions now held on the server' : 'Positions now read from module EEPROM');
+}
+
 function loadSettingsData(){
   document.getElementById('modMatrix').innerHTML='<div style="color:#888;grid-column:span 15;text-align:center;padding:8px">Loading…</div>';
   fetch('/settings').then(r=>r.json()).then(data=>{
     globalSettings=data;
+    renderPositionSource();
     document.getElementById('autoHomeToggle').checked = data.auto_home;
     document.getElementById('simRows').value = data.sim_rows||3;
     document.getElementById('simCols').value = data.sim_cols||15;

@@ -4,7 +4,7 @@ from datetime import datetime
 import logging
 import time
 from flask import Blueprint, jsonify, request
-from splitflap.settings import get_flap_chars, get_module_char_map, get_module_flap_count, save_settings, settings
+from splitflap.settings import get_flap_chars, get_module_char_map, get_module_flap_count, get_position_source, save_settings, settings
 from splitflap.grid import get_cols, get_module_count, get_rows
 from splitflap.state import resize_grid, state
 from splitflap.web.params import as_int as _as_int, module_id as _module_id
@@ -396,14 +396,20 @@ def apply_tuning():
                     error=f"Module {mod_id} index {index}: step must be between 0 and {cal - 1}"), 400
             writes.append((mod_id, index, step))
 
+    # With the server holding the positions there is nothing to put on a
+    # module: the next page sends the step itself, and writing EEPROM as well
+    # would be wear for no benefit on the one store here that loses writes.
+    to_hardware = get_position_source() != 'server'
     for mod_id, index, step in writes:
-        send_raw(f"m{mod_id:02d}w{index}:{step}")
+        if to_hardware:
+            send_raw(f"m{mod_id:02d}w{index}:{step}")
         settings['tuned_chars'].setdefault(str(mod_id), {})[str(index)] = step
     save_settings(settings)
 
     return jsonify(status="success", writes=len(writes),
                    modules=len({m for m, _, _ in writes}),
-                   hardware_updated=bool(state.ser) and bool(writes))
+                   position_source=get_position_source(),
+                   hardware_updated=to_hardware and bool(state.ser) and bool(writes))
 
 # ── Saved Playlists ──────────────────────────────────────────
 

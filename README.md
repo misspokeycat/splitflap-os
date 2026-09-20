@@ -308,6 +308,49 @@ dropped on sync rather than written into settings.json, and a module reporting
 an unusable calibration keeps the one already stored — otherwise a bad reading
 would be written back to the module on the next restore.
 
+### Where flap positions live
+
+By default each module keeps its own offset, calibration and per-character
+tuning in EEPROM, and the display is driven by character: `m05-A`, and the
+module looks up where A is. That is the original design and stays the default.
+
+The problem is that EEPROM is the least reliable store here. It is written
+while the motors are drawing, and a brownout mid-write leaves a half-written
+cell — see EEPROM drift above. Losing it means re-tuning 45 modules.
+
+`position_source` moves the authority to the Pi:
+
+```json
+{ "position_source": "server" }
+```
+
+or `SPLITFLAP_POSITION_SOURCE=server`, which takes precedence. Anything
+unrecognised means `module`, because that is the behaviour that does not
+depend on the setting being understood. There is a toggle on the calibration
+page next to Camera Tune, and it takes effect on the next page sent — no
+restart.
+
+With it set, a page sends `m05g2816` instead of `m05-A`: the motor step,
+taken from settings.json, which the module is asked only to go to. It follows
+that:
+
+- module EEPROM tuning is no longer read, so a module that has lost it still
+  displays correctly
+- `POST /apply_tuning` stops writing to modules altogether and only updates
+  settings.json, so Camera Tune does no EEPROM writes at all
+- settings.json becomes the thing to back up, which it already was — it is
+  written atomically and keeps the previous copy alongside it
+
+Modules keep whatever they already hold, so switching back changes nothing
+else. Offset and calibration still live on the module either way; this
+governs per-character positions, which is where the volume of writes was.
+
+> Worth confirming on your own hardware before relying on it: this depends on
+> firmware `g` (absolute motor step) behaving the same as character
+> navigation for every flap, including wrap. The tuning page has used `g` for
+> previews since long before this, so it works — but it has not been the
+> everyday path until now.
+
 ### Writing tuning back
 
 Two endpoints, and the difference matters because the bus is 9600 baud and

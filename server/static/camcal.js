@@ -1542,6 +1542,17 @@ async function ccWriteCorrections(){
     cc.settings.tuned_chars[key] =
       Object.assign({}, cc.settings.tuned_chars[key] || {}, changed[key]);
   }
+  // With the server holding the positions nothing went to a module, so
+  // there is nothing to read back — settings.json is the record, and it was
+  // written before the response came.
+  if(cc.settings && cc.settings.position_source === 'server'){
+    const audit = document.getElementById('ccAudit');
+    audit.style.display = 'block';
+    audit.innerHTML = '<strong style="color:var(--green)">Saved on the server.</strong> ' +
+      '<span style="color:#999">Positions are held in settings.json, so nothing was ' +
+      'written to module EEPROM and there is nothing to read back.</span>';
+    return { confirmed: true };
+  }
   return await ccConfirmWrites(Object.keys(changed).map(Number));
 }
 

@@ -23,6 +23,7 @@ from splitflap.settings import (
     get_flap_chars,
     get_module_char_map,
     get_module_flap_count,
+    get_position_source,
     settings,
 )
 from splitflap.state import state
@@ -80,6 +81,43 @@ def _prepare_text(text, raw=False):
     return clean_text.ljust(n)[:n]
 
 
+
+def module_step(mod_id, char):
+    """Where settings.json says this module stops to show this character.
+
+    The tuned position if there is one, otherwise the plain division of the
+    reel into flaps. Same answer /tuning_status reports as "active".
+    """
+    char_map = get_module_char_map(mod_id)
+    idx = char_map.find(char)
+    if idx < 0:
+        idx = 0
+    key = str(mod_id)
+    cal = int(settings['calibrations'].get(key, 4096))
+    tuned = settings['tuned_chars'].get(key, {}).get(str(idx))
+    step = int(tuned) if tuned is not None else (idx * cal) // get_module_flap_count(mod_id)
+    # A step is a position within one revolution; outside that the module has
+    # nowhere to go, and firmware would be right to ignore it.
+    return max(0, min(cal - 1, step))
+
+
+def module_frame(mod_id, char):
+    """The bus frame that puts one module on one character.
+
+    There are two ways to say it. ``m05-A`` leaves the module to look up
+    where A is, which trusts the tuning in its EEPROM. ``m05g2816`` names the
+    motor step outright, which trusts settings.json instead and asks the
+    module only to go there.
+
+    Which one is used is a setting because the two stores are not equally
+    reliable — see get_position_source. Nothing else about the send changes:
+    same frame count, same order, same timing.
+    """
+    if get_position_source() == 'server':
+        return f"m{mod_id:02d}g{module_step(mod_id, char)}"
+    return f"m{mod_id:02d}-{char}"
+
+
 def send_to_display_sync(text):
     """Send modules staggered so all arrive at their target character simultaneously."""
     if not text:
@@ -113,7 +151,7 @@ def send_to_display_sync(text):
             if remaining > 0:
                 time.sleep(remaining)
             if state.ser and not state.sim_mode:
-                state.ser.write(f"m{i:02d}-{char}\n".encode('cp1252', errors='replace'))
+                state.ser.write((module_frame(i, char) + "\n").encode('cp1252', errors='replace'))
                 state.ser.flush()
             state.current_indices[i] = target_idx
 
@@ -141,7 +179,7 @@ def send_to_display_slot(text, effect_speed=80):
     with serial_lock:
         for i in range(n):
             if state.ser and not state.sim_mode:
-                state.ser.write(f"m{i:02d}-{spin_chars[i]}\n".encode('cp1252', errors='replace'))
+                state.ser.write((module_frame(i, spin_chars[i]) + "\n").encode('cp1252', errors='replace'))
                 state.ser.flush()
             char_map = get_module_char_map(i)
             idx = char_map.find(spin_chars[i])
@@ -155,7 +193,7 @@ def send_to_display_slot(text, effect_speed=80):
         for i in range(n):
             char = clean_text[i]
             if state.ser and not state.sim_mode:
-                state.ser.write(f"m{i:02d}-{char}\n".encode('cp1252', errors='replace'))
+                state.ser.write((module_frame(i, char) + "\n").encode('cp1252', errors='replace'))
                 state.ser.flush()
                 time.sleep(effect_speed / 1000.0)
             char_map = get_module_char_map(i)
@@ -214,7 +252,7 @@ def send_to_display(text, order=None, raw=False, step_delay_ms=15):
                 continue
             char = clean_text[i]
             if state.ser and not state.sim_mode:
-                state.ser.write(f"m{i:02d}-{char}\n".encode('cp1252', errors='replace'))
+                state.ser.write((module_frame(i, char) + "\n").encode('cp1252', errors='replace'))
                 state.ser.flush()
                 time.sleep(step_delay_ms / 1000.0)
 

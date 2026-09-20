@@ -314,6 +314,16 @@ class ApplyTuningTests(SplitflapTestCase):
         self.assertEqual(body["writes"], 0)
         self.assertEqual(self.sent, [])
 
+    def test_nothing_reaches_the_bus_when_the_server_holds_positions(self):
+        # The next page sends the step itself, so writing EEPROM as well
+        # would be wear on the one store here that loses writes.
+        settings['position_source'] = 'server'
+        body = self.apply({"3": {"10": 640}}).get_json()
+        self.assertEqual(self.sent, [])
+        self.assertEqual(body["writes"], 1)
+        self.assertFalse(body["hardware_updated"])
+        self.assertEqual(settings['tuned_chars']['3']['10'], 640)
+
     def test_a_high_module_on_a_large_grid(self):
         # Defaults only cover modules 0-44; the calibration lookup must fall
         # back rather than reject a module the grid really has.
