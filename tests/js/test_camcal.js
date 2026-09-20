@@ -34,14 +34,20 @@ const controls = { ccMinConf: { value: '60' }, ccMaxFlaps: { value: '2' },
 
 const code = ['ccSolveH', 'ccGauss', 'ccApplyH', 'ccScaleH', 'ccCellQuad', 'ccScoreReads',
               'ccCornerModules', 'ccCornerCentres', 'ccOtsu', 'ccFindBlobs', 'ccStepSize',
-              'ccWrapStep']
+              'ccWrapStep', 'ccCorrelate', 'ccMatch', 'ccReadsFrom']
   .map(grab).join('\n');
 const api = new Function(
-  'cc', 'CC_CELL_INSET', 'document', 'getCharMap', 'getFlapCount',
-  code + '; return {ccSolveH, ccApplyH, ccScaleH, ccCellQuad, ccScoreReads,' +
-         ' ccCornerModules, ccCornerCentres, ccOtsu, ccFindBlobs, ccStepSize, ccWrapStep};'
+  'cc', 'document', 'getCharMap', 'getFlapCount',
+  code +
+  // Taken from the source rather than copied here, so retuning any of them
+  // is tested at its new value instead of drifting away from what this file
+  // asserts.
+  '\n' + (src.match(/^const CC_[A-Z_]+\s*=\s*[^;'"`]+;/gm) || []).join('\n') +
+  '; return {ccSolveH, ccApplyH, ccScaleH, ccCellQuad, ccScoreReads,' +
+         ' ccCornerModules, ccCornerCentres, ccOtsu, ccFindBlobs, ccStepSize, ccWrapStep,' +
+         ' ccCorrelate, ccMatch, ccReadsFrom};'
 )(
-  cc, 0.14,
+  cc,
   { getElementById: id => controls[id] },
   () => CHAR_MAP,
   () => FLAPS
@@ -271,6 +277,78 @@ const split = (dark, light) => {
 check('a dim scene splits correctly',   split(20, 90), true);
 check('a bright scene splits correctly', split(140, 230), true);
 check('a faint difference still splits', split(6, 30), true);
+
+// ── Noticing a module that is ahead ────────────────────────
+//
+// Corrections are made as the sweep goes, so only flaps already visited have
+// a reference. A module one flap behind is showing one of those and is
+// recognised. A module one flap ahead is showing a flap nothing has been
+// learnt about yet and matches nothing — and used to be written off as
+// unreadable, which is why a V showing W was never corrected while a V
+// showing U always was.
+
+// Real flap images are not unrelated: they share a module window, a frame
+// and a background, so every reference correlates fairly well with every
+// other. Built here to the separation actually measured on a capture of all
+// 63 flaps — about 0.5 between different flaps, against 0.96 for a module
+// sitting on the one it was sent to. Random vectors would be near
+// orthogonal, every match would look confident, and the test would prove
+// nothing about the situation this has to cope with.
+const LEN = 512, SHARED = Math.sqrt(0.5);
+function noise(seed) {
+  const f = new Float64Array(LEN);
+  let state = seed * 9301 + 49297;
+  for (let i = 0; i < LEN; i++) {
+    state = (state * 9301 + 49297) % 233280;
+    f[i] = state / 233280 - 0.5;
+  }
+  return f;
+}
+const BACKGROUND = noise(1);
+function vec(seed) {
+  const own = noise(seed + 100), f = new Float64Array(LEN);
+  for (let i = 0; i < LEN; i++) {
+    f[i] = SHARED * BACKGROUND[i] + Math.sqrt(1 - SHARED * SHARED) * own[i];
+  }
+  let mean = 0; for (let i = 0; i < LEN; i++) mean += f[i];
+  mean /= LEN;
+  let ss = 0; for (let i = 0; i < LEN; i++) { f[i] -= mean; ss += f[i] * f[i]; }
+  const inv = 1 / Math.sqrt(ss);
+  for (let i = 0; i < LEN; i++) f[i] *= inv;
+  return f;
+}
+
+// References for the flaps a forward sweep has reached: 8, 9 and 10.
+const visited = { 8: vec(8), 9: vec(9), 10: vec(10) };
+const unseen = vec(11);                       // flap 11, not visited yet
+
+// The premise the rest of this rests on.
+near('different flaps look alike, but not too alike',
+     api.ccCorrelate(visited[9], visited[10]), 0.5, 0.12);
+
+const behind = api.ccReadsFrom({ 10: { 0: visited[9] } }, visited, 10);
+check('a module one flap behind is recognised', behind[0].index, 9);
+check('and is not a guess', behind[0].assumed, false);
+
+const onFlap = api.ccReadsFrom({ 10: { 0: visited[10] } }, visited, 10);
+check('a module on the right flap reads as on it', onFlap[0].index, 10);
+check('and is not a guess either', onFlap[0].assumed, false);
+
+const ahead = api.ccReadsFrom({ 10: { 0: unseen } }, visited, 10);
+check('a module matching nothing seen is taken to be ahead', ahead[0].index, 11);
+check('and is marked as inferred', ahead[0].assumed, true);
+
+// The inference has to turn into a nudge backwards, or it changes nothing.
+reset();
+api.ccScoreReads(10, readsOf({ 0: { index: 11, char: CHAR_MAP[11], conf: 100, assumed: true } }),
+                 positions);
+check('being ahead is scored as one flap ahead', cc.results[0][10].err, 1);
+check('and nudges back, not forward', cc.results[0][10].to, FROM - NUDGE);
+check('and is recorded as inferred', cc.results[0][10].assumed, true);
+
+// With no reference for the commanded flap there is nothing to say yet.
+check('nothing is guessed before the flap has been seen',
+      api.ccReadsFrom({ 12: { 0: unseen } }, visited, 12)[0], null);
 
 console.log(failures ? `\n${failures} failure(s)` : '\nall checks passed');
 process.exit(failures ? 1 : 0);

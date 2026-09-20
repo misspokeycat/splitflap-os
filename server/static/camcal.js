@@ -981,6 +981,12 @@ const CC_TPL_H    = 60;
 const CC_TPL_CONF = 1200;   // margin -> the 0-100 confidence the UI filters on
 const CC_TPL_CHROMA = 2;    // how hard the colour planes pull against the shape
 const CC_TPL_ALIKE = 0.93;  // two references this similar cannot be told apart
+// How well a module correlates with the flap it was told to show, when it is
+// actually on it. Measured over a capture of all 63 flaps: on the commanded
+// flap the median is 0.965 and the first percentile 0.769; on some other flap
+// the median is 0.525. At 0.70 this calls 0.3% of correct cells wrong and
+// spots 81% of the ones that are not where they were sent.
+const CC_ON_FLAP = 0.70;
 // One length for features and references alike. They are compared element by
 // element, so the two drifting apart reads off the end of the shorter one and
 // every correlation comes back NaN.
@@ -1107,16 +1113,59 @@ function ccMatch(feature, templates){
 
 // Present a match the way ccScoreReads already expects a reading, so the
 // correction arithmetic downstream is unchanged.
+// What flap each module is believed to be on.
+//
+// Corrections happen as the sweep goes, so the only references that exist
+// are for flaps already visited. A module that is *behind* is showing one of
+// those and is recognised outright. A module that is *ahead* is showing a
+// flap nothing has been learnt about yet, so it matches nothing — and it
+// used to be filed as unreadable and left alone. That is why a V showing W
+// was never corrected while a V showing U always was.
+//
+// Matching nothing is itself the answer. If a module does not look like the
+// flap it was sent to, and does not look like any flap already seen, the
+// flap it is on must be one still to come: it is ahead. Nudge it back and
+// look again, which is what the re-read is for.
 function ccReadsFrom(samples, templates, idx){
+  const minConf = parseInt(document.getElementById('ccMinConf').value) || 0;
   const reads = new Array(cc.count).fill(null);
   const at = samples[idx] || {};
+  const ownTemplate = templates[idx];
+
   for(let m = 0; m < cc.count; m++){
     const f = at[m];
     if(!f) continue;
+    const flaps = getFlapCount(m);
     const hit = ccMatch(f, templates);
-    if(!hit) continue;
-    reads[m] = { index: hit.index, char: getCharMap(m)[hit.index] || '',
-                 conf: hit.conf, margin: hit.margin };
+    const own = ownTemplate ? ccCorrelate(f, ownTemplate) : -1;
+
+    // "Does this look like the flap it was sent to" is asked first, because
+    // it is the measurement with a known separation: on the flap the median
+    // correlation is 0.965, off it 0.525. Asking "which flap does it look
+    // most like" first lets a confident-looking match to some other visited
+    // flap answer a question it is worse at.
+    const confident = hit && hit.conf >= minConf;
+    let index, conf, assumed = false;
+    if(ownTemplate && own >= CC_ON_FLAP){
+      index = idx;
+      conf = 100;
+    } else if(confident && hit.index !== idx){
+      index = hit.index;               // recognised as a flap already seen
+      conf = hit.conf;
+    } else if(ownTemplate){
+      index = (idx + 1) % flaps;       // ahead, by the argument above
+      conf = 100;
+      assumed = true;
+    } else if(confident){
+      index = hit.index;
+      conf = hit.conf;
+    } else {
+      continue;                        // no reference yet; nothing to say
+    }
+
+    reads[m] = { index: index, char: getCharMap(m)[index] || '',
+                 conf: conf, margin: hit ? hit.margin : 0,
+                 own: own, assumed: assumed };
   }
   return reads;
 }
@@ -1484,7 +1533,11 @@ function ccScoreReads(idx, reads, positions){
 
     if(!cc.results[m]) cc.results[m] = {};
     cc.results[m][idx] = { read: r.char, matched: readIdx, conf: Math.round(r.conf),
-                           err: err, from: from, to: to };
+                           err: err, from: from, to: to,
+                           // whether the flap was recognised or inferred from
+                           // matching nothing already seen
+                           assumed: !!r.assumed,
+                           own: r.own === undefined ? null : Math.round(r.own * 1000) / 1000 };
     cc.live[m] = { char: r.char, err: err };
   }
 }

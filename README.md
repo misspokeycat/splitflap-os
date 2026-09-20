@@ -130,6 +130,20 @@ sweep. Any module not on that flap is corrected, moved, and that position is
 photographed again, before the sweep moves on. A flap that will not come
 right is named on the spot.
 
+Because corrections happen as the sweep goes, the only references that exist
+are for flaps already visited. A module one flap *behind* is showing one of
+those and is recognised outright. A module one flap *ahead* is showing a flap
+nothing has been learnt about yet, so it matches nothing — and matching
+nothing is itself the answer: the flap it is on must be one still to come.
+It is taken to be ahead, nudged back, and looked at again.
+
+Whether a module is on the flap it was sent to is decided by how well it
+matches that flap's own reference, not by which reference it matches best.
+On a capture of all 63 flaps the correlation with the commanded flap had a
+median of 0.965 when the module was on it and 0.525 when it was not, so the
+threshold sits at 0.70 — calling 0.3% of correct modules wrong and spotting
+81% of the ones that are not where they were sent.
+
 **The flap that is showing says which way to move, not how far.** A module on
 the wrong flap is somewhere past the boundary — it might be five steps over,
 it might be forty — so it is nudged 25 steps and looked at again, the same
