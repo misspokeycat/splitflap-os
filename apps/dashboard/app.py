@@ -19,7 +19,9 @@ def fetch(settings, format_lines, get_rows, get_cols):
         if loc_lat and loc_lon:
             url = f"http://api.openweathermap.org/data/2.5/weather?lat={loc_lat}&lon={loc_lon}&appid={api_key}&units=imperial"
         else:
-            zip_code = settings.get('zip_code', '02118').strip()
+            zip_code = settings.get('zip_code', '').strip()
+            if not zip_code:
+                return [time_page, format_lines("NO WEATHER DATA", "", "SET LOCATION")]
             url = f"http://api.openweathermap.org/data/2.5/weather?zip={zip_code},us&appid={api_key}&units=imperial"
         res = requests.get(url, timeout=5).json()
         c = get_cols()

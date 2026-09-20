@@ -21,7 +21,7 @@ from splitflap.settings import settings
 class AppIdValidationTests(unittest.TestCase):
     def test_accepts_the_ids_the_shipped_apps_use(self):
         for app_id in ("time", "world_clock", "word-clock", "anim_checker",
-                       "star-wars-quotes", "yt_comments", "bitcoin-fear-greed"):
+                       "planes_overhead", "word-of-the-day", "on-this-day"):
             with self.subTest(app_id=app_id):
                 self.assertTrue(is_valid_app_id(app_id))
 

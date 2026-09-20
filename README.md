@@ -6,7 +6,7 @@ Built on [Adam G Makes' Split-Flap Display](https://github.com/adamgmakes/SplitF
 
 ## Features
 
-- **40+ apps** — weather, stocks, sports scores, crypto, word clock, trivia, news headlines, quotes, and more
+- **Apps** — weather, stocks, sports scores, word clock, trivia, news headlines, and more
 - **App Library** — browse and install apps by category (time, entertainment, news, lifestyle, education, finance, sports)
 - **Compose** — click-to-type grid editor with color tile support
 - **Playlists** — sequence apps and composed messages with per-entry timing and transitions
@@ -37,7 +37,7 @@ On your Split-Flap Display's Raspberry Pi:
 > ```
 
 ```bash
-git clone https://github.com/csader/splitflap-os.git
+git clone <your-fork-url> splitflap-os
 cd splitflap-os
 sudo bash setup/install.sh
 ```

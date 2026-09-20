@@ -103,28 +103,3 @@ def stocks_search_route():
         logging.error(f"Stock search error: {e}")
         return jsonify(tickers=[], error=str(e)), 502
 
-_crypto_cache = []
-
-@bp.route('/crypto_search')
-def crypto_search_route():
-    """Search CoinGecko coins (cached)."""
-    global _crypto_cache
-    query = request.args.get('q', '').strip().lower()
-    if len(query) < 1:
-        return jsonify(coins=[])
-    if not _crypto_cache:
-        try:
-            data = requests.get('https://api.coingecko.com/api/v3/coins/list', timeout=10).json()
-            _crypto_cache = [{'id': c['id'], 'symbol': c['symbol'].upper(), 'name': c['name']} for c in data]
-        except Exception as e:
-            logging.error(f"CoinGecko fetch error: {e}")
-            return jsonify(coins=[], error=str(e)), 502
-    results = []
-    for c in _crypto_cache:
-        if query in c['name'].lower() or query in c['symbol'].lower() or query in c['id']:
-            results.append({'value': c['id'], 'label': f"{c['name']} ({c['symbol']})",
-                            '_exact': c['id']==query or c['name'].lower()==query or c['symbol'].lower()==query})
-            if len(results) >= 30: break
-    results.sort(key=lambda r: (not r['_exact'], r['label'].lower()))
-    for r in results: del r['_exact']
-    return jsonify(coins=results[:12])

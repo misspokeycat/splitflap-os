@@ -36,7 +36,9 @@ def trigger(settings, conditions):
             if loc_lat and loc_lon:
                 user_lat, user_lon = float(loc_lat), float(loc_lon)
             else:
-                zip_code = settings.get('zip_code', '02118')
+                zip_code = settings.get('zip_code', '')
+                if not zip_code:
+                    return False
                 geo = requests.get(
                     f'https://nominatim.openstreetmap.org/search?q={zip_code}&format=json&limit=1',
                     timeout=5, headers={'User-Agent': 'SplitFlapOS/1.0'}

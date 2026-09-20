@@ -67,10 +67,13 @@ def check_update():
     behind = commits_behind(target)
     result['commits_behind'] = behind
 
-    try:
-        result.update(_release_notes(target['repo']))
-    except Exception as e:
-        logging.warning(f"Release lookup failed: {e}")
+    # No repo means the remote is not on GitHub, so there is no releases API
+    # to ask. The git comparison above is the real answer either way.
+    if target['repo']:
+        try:
+            result.update(_release_notes(target['repo']))
+        except Exception as e:
+            logging.warning(f"Release lookup failed: {e}")
 
     if behind is None:
         # git could not reach the remote. The release comparison is the only

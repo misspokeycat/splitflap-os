@@ -219,7 +219,7 @@ def fetch(settings, format_lines, get_rows, get_cols):
         setattr(fetch, '_state', state)
 
     api_key = settings.get('weather_api_key', '')
-    zip_code = settings.get('zip_code', '02118')
+    zip_code = settings.get('zip_code', '')
     weather_provider = settings.get('weather_provider', 'openweather')
     temp_unit = str(settings.get('temperature_unit', 'f')).lower()
     if temp_unit not in ('f', 'c', 'k'):
@@ -248,15 +248,16 @@ def fetch(settings, format_lines, get_rows, get_cols):
         _lat, _lon = float(loc_lat), float(loc_lon)
         _city = loc_name.split(',')[0].strip().upper() if loc_name else 'LOCATION'
     else:
+        # Falling back to a fixed city would report a real-looking forecast for
+        # somewhere the display is not. Say the location is unset instead.
         geo = requests.get(
             f'https://nominatim.openstreetmap.org/search?q={zip_code}&format=json&limit=1',
             timeout=5, headers={'User-Agent': 'SplitFlapOS/1.0'}
-        ).json()
-        if geo:
-            _lat, _lon = float(geo[0]['lat']), float(geo[0]['lon'])
-            _city = geo[0].get('display_name', zip_code).split(',')[0].strip().upper()
-        else:
-            _lat, _lon, _city = 42.3496, -71.0783, 'BOSTON'
+        ).json() if zip_code else []
+        if not geo:
+            return [format_lines('WEATHER', 'NO LOCATION', 'SET IN SETTINGS')]
+        _lat, _lon = float(geo[0]['lat']), float(geo[0]['lon'])
+        _city = geo[0].get('display_name', zip_code).split(',')[0].strip().upper()
 
     settings_sig = (
         api_key, _lat, _lon, weather_provider, temp_unit,
@@ -638,7 +639,9 @@ def trigger(settings, conditions):
         if loc_lat and loc_lon:
             lat, lon = float(loc_lat), float(loc_lon)
         else:
-            zip_code = settings.get('zip_code', '02118')
+            zip_code = settings.get('zip_code', '')
+            if not zip_code:
+                return False
             geo = requests.get(
                 f'https://nominatim.openstreetmap.org/search?q={zip_code}&format=json&limit=1',
                 timeout=5, headers={'User-Agent': 'SplitFlapOS/1.0'}

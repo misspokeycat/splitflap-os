@@ -14,6 +14,7 @@ from splitflap.plugins import is_valid_app_id, _plugin_registry, _plugin_trigger
 from splitflap.mqtt import mqtt_publish_discovery
 from splitflap.triggers import _trigger_cooldowns
 from splitflap.sports import SPORTS_LEAGUES
+from splitflap.updates import app_library_base
 
 bp = Blueprint("apps", __name__)
 
@@ -54,7 +55,15 @@ def app_library_install():
     app_dir = os.path.join(APPS_PATH, app_id)
     if not os.path.isdir(app_dir):
         # Download from remote if not local
-        base_url = settings.get('app_library_url', 'https://raw.githubusercontent.com/csader/splitflap-os/main/apps')
+        # Configured URL wins; otherwise fetch from the repository this
+        # checkout came from, so a fork installs its own copy of an app.
+        base_url = str(settings.get('app_library_url', '') or '').strip() or app_library_base()
+        if not base_url:
+            return jsonify(
+                status="error",
+                message="No app library URL: this checkout has no GitHub remote "
+                        "to download from. Set one in Settings.",
+            ), 503
         try:
             os.makedirs(app_dir, exist_ok=True)
             manifest_url = f"{base_url}/{app_id}/manifest.json"

@@ -21,10 +21,6 @@ from splitflap.settings import REPO_DIR
 
 GIT_TIMEOUT = 30
 
-# Falls back to the upstream project when the remote is not a GitHub URL, so
-# release notes still resolve for a checkout cloned some other way.
-DEFAULT_REPO = 'csader/splitflap-os'
-
 GITHUB_URL_RE = re.compile(
     r'^(?:(?:https?|git|ssh)://)?(?:[^@/]+@)?github\.com[:/]+'
     r'(?P<owner>[^/]+)/(?P<name>[^/]+?)(?:\.git)?/?$',
@@ -78,7 +74,7 @@ def update_target():
     someone else's branch over the one they are running.
     """
     blank = {"branch": None, "remote": None, "remote_branch": None,
-             "detached": True, "url": None, "repo": DEFAULT_REPO}
+             "detached": True, "url": None, "repo": None}
 
     ok, branch = git('rev-parse', '--abbrev-ref', 'HEAD', timeout=10)
     if not ok or not branch or branch == 'HEAD':
@@ -101,8 +97,23 @@ def update_target():
         "remote_branch": remote_branch,
         "detached": False,
         "url": url,
-        "repo": parse_github_repo(url) or DEFAULT_REPO,
+        "repo": parse_github_repo(url),
     }
+
+
+def app_library_base():
+    """Where the app library downloads apps from, or None if it cannot tell.
+
+    Naming a repository here would point every fork at whoever published
+    first: installing an app would fetch that project's copy rather than the
+    one this checkout ships. The checkout already records where it came from,
+    so ask git instead. Callers fall back to whatever the operator configured.
+    """
+    target = update_target()
+    repo, branch = target.get("repo"), target.get("remote_branch")
+    if not repo or not branch:
+        return None
+    return f"https://raw.githubusercontent.com/{repo}/{branch}/apps"
 
 
 def describe(target):

@@ -121,11 +121,14 @@ class UpdateTargetTests(unittest.TestCase):
 
         self.assertTrue(self.resolve(git)["detached"])
 
-    def test_a_remote_that_is_not_github_still_resolves_release_notes(self):
+    def test_a_remote_that_is_not_github_resolves_no_repo(self):
+        """Naming a fallback repository here would point every checkout at
+        whoever published first — release notes and app downloads would come
+        from that project rather than this one. No answer beats a wrong one."""
         git = FakeGit(dict(ON_A_BRANCH,
                            **{"remote get-url upstream": "/srv/mirror/splitflap.git"}))
 
-        self.assertEqual(self.resolve(git)["repo"], updates.DEFAULT_REPO)
+        self.assertIsNone(self.resolve(git)["repo"])
 
 
 class CommitsBehindTests(unittest.TestCase):

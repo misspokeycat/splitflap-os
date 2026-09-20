@@ -33,7 +33,6 @@ EXPECTED_ROUTES = [
     ("/backup_settings", "tuning.backup_settings", "GET"),
     ("/check_update", "system.check_update", "GET"),
     ("/connection", "hardware.connection_config", "GET,POST"),
-    ("/crypto_search", "search.crypto_search_route", "GET"),
     ("/current_state", "display.current_state", "GET"),
     ("/custom_tune", "tuning.custom_tune", "POST"),
     ("/grid_config", "display.grid_config", "GET"),
@@ -93,7 +92,6 @@ GET_ARGS = {
     "/location_timezone": "?lat=42.35&lon=-71.06",
     "/timezones": "?q=east",
     "/stocks_search": "?q=aapl",
-    "/crypto_search": "?q=bitcoin",
     "/sports_teams/<league_key>": "",
 }
 
