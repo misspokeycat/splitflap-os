@@ -209,6 +209,16 @@
 
         <div id="provisionConnectionNotice" class="provision-notice"></div>
 
+        <div class="provision-recovery">
+          <div>
+            <h4>Restore modules that lose their ID</h4>
+            <p>Module IDs live in EEPROM, and EEPROM fails. When a module Splitflap OS
+               has seen before starts asking for a new ID, give it back the one it had
+               along with its stored offset, calibration and tuning.</p>
+          </div>
+          <label class="switch"><input type="checkbox" id="autoReprovisionToggle" onchange="toggleAutoReprovision()"><span class="slider"></span></label>
+        </div>
+
         <section class="provision-section">
           <div class="provision-section-heading">
             <div>

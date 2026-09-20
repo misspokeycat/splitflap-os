@@ -10,6 +10,7 @@ from splitflap.state import resize_grid, state
 from splitflap.web.params import as_int as _as_int, module_id as _module_id
 from splitflap.transport import (
     read_hardware_data,
+    restore_module_settings,
     sanitise_module_data,
     send_raw,
     serial_lock,
@@ -334,14 +335,7 @@ def restore_settings():
     if state.ser:
         hw = True
         for i in range(get_module_count()):
-            s = str(i)
-            send_raw(f"m{i:02d}o{int(settings['offsets'].get(s, 2832))}")
-            send_raw(f"m{i:02d}t{int(settings['calibrations'].get(s, 4096))}")
-            send_raw(f"m{i:02d}e")
-            for idx, step in settings['tuned_chars'].get(s, {}).items():
-                sv = int(step)
-                if sv != 65535:
-                    send_raw(f"m{i:02d}w{idx}:{sv}")
+            restore_module_settings(i)
             logging.info(f"Restored m{i:02d}")
     return jsonify(status="success", hardware_updated=hw,
                    modules_updated=get_module_count())

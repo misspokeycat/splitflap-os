@@ -6,7 +6,7 @@ import time
 from splitflap.mqtt import mqtt_setup
 from splitflap.settings import settings
 from splitflap.tasks import BACKGROUND_TASKS, start_background_task
-from splitflap.transport import send_raw
+from splitflap.transport import send_raw, universal_firmware
 
 
 def apply_auto_home_setting():
@@ -37,7 +37,23 @@ def _startup_auto_home():
         logging.error(f"Applying the auto-home setting failed: {e}")
 
 
+def _startup_module_watch():
+    """Start watching the bus for modules that have forgotten who they are.
+
+    The Universal Firmware reader used to start on the first request from the
+    calibration page, which is the one page nobody has open when a module
+    drops off. A module that loses its ID leaves its place in the display
+    blank, so the watch that puts it back has to be running all along.
+    """
+    time.sleep(3)
+    try:
+        universal_firmware.ensure_started()
+    except Exception as e:
+        logging.error(f"Starting the Universal Firmware watcher failed: {e}")
+
+
 start_background_task(_startup_auto_home)
+start_background_task(_startup_module_watch)
 
 # Connected here (not at import time) so the plugin registry and playlist
 # globals that the discovery/state publishers read already exist.

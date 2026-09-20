@@ -191,6 +191,12 @@ h3{margin-top:0;color:var(--text)}
 .provision-section-heading h4{margin:0 0 3px;color:#eee;font-size:.92rem}
 .provision-section-heading p{margin:0;color:#777;font-size:.76rem;line-height:1.45}
 .provision-list{display:flex;flex-direction:column;gap:8px}
+.provision-recovery{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 12px;background:#191919;border:1px solid #343434;border-radius:10px;margin-bottom:12px}
+.provision-recovery h4{margin:0 0 3px;color:#eee;font-size:.86rem}
+.provision-recovery p{margin:0;color:#777;font-size:.75rem;line-height:1.45;max-width:560px}
+.provision-known{font-size:.69rem;color:#7ce4a2;margin-top:3px}
+.provision-known.warn{color:#f7c66e}
+.provision-restored{font-family:monospace;font-size:.72rem;color:#f7c66e;background:#302109;border:1px solid #704c0b;padding:2px 6px;border-radius:999px;white-space:nowrap}
 .provision-empty{color:#666;font-size:.82rem;padding:9px 2px}
 .provision-unassigned{display:grid;grid-template-columns:minmax(190px,1fr) auto minmax(74px,100px) auto;gap:8px;align-items:center;padding:10px;background:#211b12;border:1px solid #604415;border-radius:8px}
 .provision-serial{font-family:'Courier New',monospace;font-size:.79rem;color:#f5bf5c;word-break:break-all}

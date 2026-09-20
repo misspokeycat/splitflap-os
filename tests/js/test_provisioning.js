@@ -1,6 +1,10 @@
 // Typing a module ID must survive the status poll that rebuilds this list.
 // Before this was fixed, typing an ID and pausing replaced it with the
 // auto-suggested one — 0, when nothing was assigned yet.
+//
+// The same renderer also shows what the server already knows: a module whose
+// chip serial we have seen before is one it is about to reclaim, and the row
+// says which ID is coming back rather than offering a blank one.
 const fs = require('fs');
 const { El } = require(require('path').join(__dirname, 'dom_stub.js'));
 
@@ -15,7 +19,8 @@ const grab = name => {
 };
 const list = new El();
 const ctx = { document: { getElementById: () => list, activeElement: null }, escapeProvision: s => s };
-const code = [grab('collectTypedIds'), grab('restoreTypedIds'), grab('renderUnprovisionedModules')].join('\n');
+const code = [grab('collectTypedIds'), grab('restoreTypedIds'), grab('provisionKnownNote'),
+              grab('renderUnprovisionedModules')].join('\n');
 const fn = new Function('document', 'escapeProvision', code + '; return renderUnprovisionedModules;');
 const render = fn(ctx.document, ctx.escapeProvision);
 
@@ -49,5 +54,28 @@ ctx.document.activeElement = null;
 render([{ serial: 'BBBB', age_seconds: 9 }], [], 0);
 check('assigned module removed', list.children.length, 1);
 check('remaining module suggested', list.children[0].value, '0');
+
+// a module we have seen before is offered its own ID back, and says so
+const known = [{ serial: 'CCCC', age_seconds: 2, known_id: 4 },
+               { serial: 'DDDD', age_seconds: 2 }];
+render(known, [], 0);
+check('known module keeps its id', list.children[0].value, '4');
+check('its id is not offered to anyone else', list.children[1].value, '0');
+check('the row says it is coming back', /Known module 04/.test(list.innerHTML), true);
+
+// and a typed id still wins, the same as for any other module
+list.children[0].value = '9';
+list.children[0].dataset.edited = '1';
+render(known, [], 0);
+check('typed id beats the known one', list.children[0].value, '9');
+
+// with the restore switched off the row is a note, not a promise
+render(known, [], 0, false);
+check('off states what it knows', /automatic restore is off/.test(list.innerHTML), true);
+
+// a module that could not be given its id back says why
+render([{ serial: 'CCCC', age_seconds: 2, known_id: 4,
+          recovery: { status: 'conflict', message: 'Module 04 is already answering as EEEE.' } }], [], 0);
+check('a conflict is reported', /already answering as EEEE/.test(list.innerHTML), true);
 
 process.exit(failures ? 1 : 0);

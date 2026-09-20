@@ -117,6 +117,8 @@ def load_settings():
         "gateway_password": "",
         "char_map": DEFAULT_FLAP_CHARS,
         "module_configs": {},
+        "module_registry": {},
+        "auto_reprovision": True,
         "triggers_enabled": True,
         "triggers": [],
         "installed_apps": [

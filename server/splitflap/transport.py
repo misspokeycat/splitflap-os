@@ -18,6 +18,7 @@ import serial
 import serial.tools.list_ports
 
 from hardware.universal_firmware import UniversalFirmwareManager
+from splitflap.module_registry import ModuleRegistry
 from splitflap.settings import read_config_file, save_settings, settings
 from splitflap.state import state
 
@@ -262,6 +263,24 @@ def sync_hardware_data(mod_id):
     return True
 
 
+def restore_module_settings(mod_id):
+    """Push our stored offset, calibration and tuning back onto one module.
+
+    The module's own copy is in EEPROM, so this is what a module gets after
+    losing it — and it is one module's worth of exactly what /restore_settings
+    does to the whole display.
+    """
+    mod_id = int(mod_id)
+    key = str(mod_id)
+    send_raw(f"m{mod_id:02d}o{int(settings['offsets'].get(key, 2832))}")
+    send_raw(f"m{mod_id:02d}t{int(settings['calibrations'].get(key, 4096))}")
+    send_raw(f"m{mod_id:02d}e")
+    for index, step in settings['tuned_chars'].get(key, {}).items():
+        step = int(step)
+        if step != ERASED:
+            send_raw(f"m{mod_id:02d}w{index}:{step}")
+
+
 def parse_module_config(data):
     """Pull what we can out of an ``A`` command response.
 
@@ -388,8 +407,11 @@ def sync_module_config(mod_id):
 state.ser, state.serial_port = open_connection()
 state.sim_mode = not state.ser
 
+module_registry = ModuleRegistry(restore=restore_module_settings)
+
 universal_firmware = UniversalFirmwareManager(
     get_serial=lambda: state.ser,
     serial_lock=serial_lock,
     get_sim_mode=lambda: state.sim_mode,
+    registry=module_registry,
 )

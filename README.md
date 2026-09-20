@@ -127,6 +127,7 @@ splitflap/
   grid.py                 — grid geometry and text layout
   state.py                — RuntimeState: the state shared across threads
   transport.py            — the wire to the display (serial or MQTT gateway)
+  module_registry.py      — which chip serial answers to which module ID
   display.py              — rendering text onto the modules
   animations.py           — module send orders for transitions
   plugins.py              — the app plugin system
@@ -136,7 +137,7 @@ splitflap/
   notifications.py        — the /notify queue
   network.py              — connectivity probing
   mqtt.py                 — Home Assistant integration
-  startup.py              — boot tasks (auto-home, broker connect)
+  startup.py              — boot tasks (auto-home, broker connect, module watch)
   tasks.py                — background loop registration
   web/                    — HTTP routes, one blueprint per area of the UI
 hardware/                 — Universal Firmware provisioning
@@ -213,6 +214,30 @@ curl -X POST http://splitflap.local/module_audit \
 Each module comes back as `ok`, `diverged` (disagrees with settings.json),
 `suspect` (holds values that cannot be right), `unusable`, or `no_response`.
 Omit `ids` to audit the whole display.
+
+### When a module forgets its ID
+
+A Universal Firmware module's ID lives in that same EEPROM. A module that
+loses it stops answering to its address and starts advertising for a new one,
+so its place in the display goes blank until someone opens the calibration
+page and assigns it again by hand.
+
+The chip serial cannot be lost — it is burned into the microcontroller — so
+Splitflap OS records which serial answers to which ID as it sees them on the
+bus, under `module_registry` in settings.json. When a module it recognises
+starts asking for an ID, it checks that nothing else is answering to that ID,
+hands back the one that module had, and writes its stored offset, calibration
+and per-character tuning back onto it.
+
+It never takes an ID from a module still using it, and it gives up after three
+tries, so a module that cannot hold a write does not become a write every
+fifteen seconds. De-provisioning a module from the calibration page forgets
+it too: an ID erased on purpose stays erased.
+
+Each module's card on the calibration page counts how often this has happened
+to it. A module that needs it repeatedly has failing EEPROM and wants
+replacing. The switch at the top of the Provision card turns the whole thing
+off (`auto_reprovision` in settings.json).
 
 The same text form reaches the display over MQTT, if the Home Assistant
 integration is enabled:

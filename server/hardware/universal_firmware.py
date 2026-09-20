@@ -8,6 +8,16 @@ follows the same rule as the existing calibration code:
 * the passive reader only observes unsolicited traffic while the bus is idle;
 * Universal Firmware commands that expect replies write and read under the
   shared serial lock, then feed those bytes through the same parser.
+
+Modules forget who they are. The module ID lives in the same EEPROM as the
+calibration, and when a cell goes the module stops answering to its address
+and starts advertising for a new one — its place in the display goes blank.
+The chip serial cannot be forgotten, so an injected registry (see
+splitflap.module_registry) remembers which serial answers to which ID and this
+manager hands it back. That runs from the passive reader thread and never from
+the parse path: provisioning needs the serial lock for a full write/read
+transaction, and the parser is usually being called by something already
+holding it.
 """
 
 from collections import deque
@@ -137,11 +147,20 @@ class UniversalFirmwareManager:
 
     ADVERTISEMENT_TTL_SECONDS = 45
     EVENT_HISTORY_SIZE = 256
+    # A module that cannot be written to will advertise forever. Back off
+    # between tries and stop after a few, so a dead module costs a handful of
+    # transactions rather than one every time it advertises.
+    RECOVERY_RETRY_SECONDS = 20.0
+    RECOVERY_MAX_ATTEMPTS = 3
+    RECOVERY_SWEEP_SECONDS = 1.0
+    RECOVERY_PROBE_SECONDS = 1.0
+    RECOVERY_ACK_TIMEOUT = 2.0
 
-    def __init__(self, get_serial, serial_lock, get_sim_mode=None):
+    def __init__(self, get_serial, serial_lock, get_sim_mode=None, registry=None):
         self._get_serial = get_serial
         self._serial_lock = serial_lock
         self._get_sim_mode = get_sim_mode or (lambda: False)
+        self._registry = registry
         self._state_lock = threading.RLock()
         self._condition = threading.Condition(self._state_lock)
         self._rx_lock = threading.Lock()
@@ -151,9 +170,11 @@ class UniversalFirmwareManager:
         self._event_sequence = 0
         self._rx_buffer = b""
         self._serial_identity = None
+        self._recovery = {}
         self._scan_deadline = 0.0
         self._last_scan_at = 0.0
         self._last_cleanup_at = 0.0
+        self._last_recovery_sweep = 0.0
         self._stop_event = threading.Event()
         self._reader_thread = None
 
@@ -186,10 +207,12 @@ class UniversalFirmwareManager:
                 self._unprovisioned.clear()
                 self._events.clear()
                 self._event_sequence = 0
+                self._recovery.clear()
                 self._serial_identity = None
                 self._scan_deadline = 0.0
                 self._last_scan_at = 0.0
                 self._last_cleanup_at = 0.0
+                self._last_recovery_sweep = 0.0
                 self._condition.notify_all()
 
     def _reader_loop(self):
@@ -228,6 +251,7 @@ class UniversalFirmwareManager:
                 self.feed_bytes(chunk)
             else:
                 self._cleanup_if_due()
+                self._recover_if_due()
                 time.sleep(0.01)
 
     def feed_bytes(self, chunk):
@@ -284,6 +308,7 @@ class UniversalFirmwareManager:
             return None
 
         now = time.time()
+        pairing = None
         with self._condition:
             self._prune_expired_unprovisioned_locked(now)
             event = dict(event)
@@ -315,6 +340,7 @@ class UniversalFirmwareManager:
                     "last_seen": now,
                 })
                 self._modules[module_id] = module
+                pairing = (serial_number, module_id, module.get("firmware"))
 
             elif event["type"] == "version" and event["universal"]:
                 module_id = event["reported_id"]
@@ -339,6 +365,7 @@ class UniversalFirmwareManager:
                 else:
                     self._unprovisioned.pop(event["serial"], None)
                     self._modules[module_id] = module
+                    pairing = (event["serial"], module_id, event["firmware"])
 
             elif event["type"] in ("snapshot", "hall", "mechanical"):
                 module = self._modules.get(event["id"])
@@ -351,6 +378,9 @@ class UniversalFirmwareManager:
                     }
 
             self._condition.notify_all()
+
+        if pairing:
+            self._registry_call("remember", *pairing)
         return event
 
     def _connected(self):
@@ -465,9 +495,27 @@ class UniversalFirmwareManager:
                 if now - item["last_seen"] > self.ADVERTISEMENT_TTL_SECONDS:
                     continue
                 item["age_seconds"] = max(0, int(now - item["last_seen"]))
+                record = self._recovery.get(serial_number)
+                if record:
+                    item["recovery"] = dict(record)
                 unprovisioned.append(item)
 
+        # Registry reads happen with the state lock released, for the same
+        # reason the writes do.
+        for module in modules:
+            recoveries = self._registry_call("recoveries", module.get("serial"))
+            if recoveries:
+                module["recoveries"] = recoveries
+        for item in unprovisioned:
+            # A module we recognise is one the server is about to reclaim, and
+            # the UI says so rather than offering it as a blank slate.
+            item["known_id"] = self._registry_call("known_id", item["serial"])
+        auto_reprovision = self._recovery_enabled()
+
+        with self._condition:
             used_ids = {module["id"] for module in modules}
+            used_ids |= {item["known_id"] for item in unprovisioned
+                         if item.get("known_id") is not None}
             preferred_limit = max(1, min(int(module_limit or 45), 255))
             suggested_id = next(
                 (module_id for module_id in range(preferred_limit)
@@ -478,6 +526,7 @@ class UniversalFirmwareManager:
             return {
                 "connected": self._connected(),
                 "live": not self._get_sim_mode(),
+                "auto_reprovision": auto_reprovision,
                 "has_universal": bool(modules),
                 "modules": modules,
                 "unprovisioned": unprovisioned,
@@ -561,6 +610,8 @@ class UniversalFirmwareManager:
             ),
         )
         if acknowledgement:
+            with self._condition:
+                self._recovery.pop(serial_number, None)
             # Query after assignment so the inventory gains its firmware version.
             time.sleep(0.05)
             self._transaction(
@@ -578,12 +629,165 @@ class UniversalFirmwareManager:
         module_id = self.validate_id(module_id)
         self._write("m{}R".format(module_id))
         with self._condition:
-            self._modules.pop(module_id, None)
+            module = self._modules.pop(module_id, None)
+            self._recovery.pop((module or {}).get("serial"), None)
+        # Someone wants this module unassigned, so the pairing has to go too:
+        # otherwise the next advertisement would be answered with the ID they
+        # just erased.
+        self._registry_call("forget", module_id=module_id)
 
     def deprovision_all(self):
         self._write("m*R")
         with self._condition:
             self._modules.clear()
+            self._recovery.clear()
+        self._registry_call("forget_all")
+
+    # ── Identity recovery ────────────────────────────────────
+
+    def _registry_call(self, name, *args, **kwargs):
+        """Call the registry, if there is one, without ever failing the bus."""
+        if self._registry is None:
+            return None
+        try:
+            return getattr(self._registry, name)(*args, **kwargs)
+        except Exception:
+            logging.exception("Module registry %s failed", name)
+            return None
+
+    def _recovery_enabled(self):
+        return bool(self._registry is not None and self._registry_call("enabled"))
+
+    def _recovery_candidates(self, now):
+        """Modules advertising for an ID that we already know the answer to."""
+        with self._condition:
+            advertising = [
+                serial_number
+                for serial_number, item in sorted(self._unprovisioned.items())
+                if now - item["last_seen"] <= self.ADVERTISEMENT_TTL_SECONDS
+            ]
+            attempted = {
+                serial_number: dict(record)
+                for serial_number, record in self._recovery.items()
+            }
+
+        candidates = []
+        for serial_number in advertising:
+            record = attempted.get(serial_number)
+            if record:
+                if record["attempts"] >= self.RECOVERY_MAX_ATTEMPTS:
+                    continue
+                if now - record["last_attempt_at"] < self.RECOVERY_RETRY_SECONDS:
+                    continue
+            module_id = self._registry_call("known_id", serial_number)
+            if module_id is not None:
+                candidates.append((serial_number, module_id))
+        return candidates
+
+    def recover_pending(self):
+        """Give their IDs back to any modules on the bus that have lost theirs.
+
+        Called from the passive reader thread, which holds no lock between
+        reads. Returns one record per module it tried, so a caller driving
+        this directly can see what happened.
+        """
+        # A sweep with no bus to talk to would only spend attempts on
+        # failures that say nothing about the modules.
+        if not self._recovery_enabled() or self._get_sim_mode() or not self._connected():
+            return []
+        return [
+            self._recover(serial_number, module_id)
+            for serial_number, module_id in self._recovery_candidates(time.time())
+        ]
+
+    def _record_recovery(self, serial_number, module_id, attempts, status, message=""):
+        record = {
+            "serial": serial_number,
+            "id": module_id,
+            "attempts": attempts,
+            "status": status,
+            "message": message,
+            "last_attempt_at": time.time(),
+        }
+        with self._condition:
+            self._recovery[serial_number] = record
+        return dict(record)
+
+    def _id_holder(self, module_id):
+        """Who answers to this ID right now — a serial, "unknown", or None.
+
+        Our inventory cannot be trusted for this. Modules say nothing unless
+        they are asked, so an entry that has not been heard from in an hour
+        describes a module that is perfectly fine just as well as one that has
+        gone. Handing out an ID is only safe if nobody answers to it, so ask.
+
+        A module on the original firmware answers without a serial, and
+        "something is there but I cannot say what" still means taken.
+        """
+        answer = self._transaction(
+            "m{}v".format(module_id),
+            timeout=self.RECOVERY_PROBE_SECONDS,
+            predicate=lambda event: (
+                event["type"] == "version" and event.get("reported_id") == module_id
+            ),
+        )
+        if answer is None:
+            return None
+        return (answer.get("serial") or "").upper() or "unknown"
+
+    def _recover(self, serial_number, module_id):
+        with self._condition:
+            attempts = int(self._recovery.get(serial_number, {}).get("attempts", 0)) + 1
+
+        try:
+            occupant = self._id_holder(module_id)
+            if occupant and occupant != serial_number:
+                logging.warning(
+                    "%s is asking for an ID and we have it down as module %02d, but "
+                    "%s is answering to that ID; leaving it alone",
+                    serial_number, module_id, occupant)
+                return self._record_recovery(
+                    serial_number, module_id, attempts, "conflict",
+                    "Module {:02d} is already answering as {}.".format(module_id, occupant))
+
+            if occupant is None:
+                # Nobody is there. Anything our inventory still believes about
+                # that ID is out of date, and provision() would refuse on the
+                # strength of it.
+                with self._condition:
+                    stale = self._modules.get(module_id)
+                    if stale and stale.get("serial") != serial_number:
+                        self._modules.pop(module_id, None)
+
+            acknowledged = self.provision(
+                serial_number, module_id, timeout=self.RECOVERY_ACK_TIMEOUT)
+        except UniversalFirmwareError as exc:
+            logging.warning("Could not give module %02d back to %s: %s",
+                            module_id, serial_number, exc)
+            return self._record_recovery(
+                serial_number, module_id, attempts, "failed", str(exc))
+
+        if not acknowledged:
+            return self._record_recovery(
+                serial_number, module_id, attempts, "unconfirmed",
+                "No acknowledgement was received.")
+
+        # Attempts reset on success: a module that forgets again months from
+        # now should not be starting from a spent budget.
+        record = self._record_recovery(serial_number, module_id, 0, "recovered")
+        self._registry_call("on_recovered", serial_number, module_id)
+        return record
+
+    def _recover_if_due(self):
+        now = time.monotonic()
+        with self._condition:
+            if now - self._last_recovery_sweep < self.RECOVERY_SWEEP_SECONDS:
+                return
+            self._last_recovery_sweep = now
+        try:
+            self.recover_pending()
+        except UniversalFirmwareError as exc:
+            logging.debug("Universal Firmware recovery deferred: %s", exc)
 
     def run_diagnostic(self, module_id, kind="snapshot", revolutions=5):
         module_id = self.validate_id(module_id)

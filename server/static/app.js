@@ -2329,6 +2329,8 @@ function renderUniversalProvisioning(data){
 
   const modules = data.modules || [];
   const unprovisioned = data.unprovisioned || [];
+  const restoring = data.auto_reprovision
+    ? unprovisioned.filter(item=>Number.isInteger(item.known_id)).length : 0;
   const active = modules.length > 0 || unprovisioned.length > 0;
   card.classList.toggle('has-unprovisioned', unprovisioned.length > 0);
   if(universalProvisioning.manualOpen === null) setProvisionCardOpen(active, false);
@@ -2336,6 +2338,7 @@ function renderUniversalProvisioning(data){
   const subtitle = document.getElementById('provisionCardSubtitle');
   if(!data.connected) subtitle.textContent = 'No serial hardware connected';
   else if(!data.live) subtitle.textContent = 'Switch to LIVE mode to scan and provision';
+  else if(restoring) subtitle.textContent = `Restoring ${restoring} module${restoring===1?'':'s'} that lost ${restoring===1?'its':'their'} ID`;
   else if(unprovisioned.length) subtitle.textContent = `${unprovisioned.length} module${unprovisioned.length===1?'':'s'} waiting for an ID`;
   else if(modules.length) subtitle.textContent = `${modules.length} Universal Firmware module${modules.length===1?'':'s'} detected`;
   else if(data.scan_in_progress) subtitle.textContent = 'Scanning the configured module range…';
@@ -2368,7 +2371,10 @@ function renderUniversalProvisioning(data){
       : '<i data-lucide="scan-search" style="width:14px;height:14px"></i> Scan';
   }
 
-  renderUnprovisionedModules(unprovisioned, modules, data.suggested_id);
+  const autoReprovision = document.getElementById('autoReprovisionToggle');
+  if(autoReprovision) autoReprovision.checked = data.auto_reprovision !== false;
+
+  renderUnprovisionedModules(unprovisioned, modules, data.suggested_id, data.auto_reprovision !== false);
   renderUniversalModules(modules);
   if(typeof lucide!=='undefined') lucide.createIcons();
 }
@@ -2394,7 +2400,22 @@ function restoreTypedIds(list, typed){
   });
 }
 
-function renderUnprovisionedModules(items, modules, firstSuggestedId){
+// What we know about a module that is asking for an ID. A serial we have
+// seen before is one the server is about to reclaim, and saying so is the
+// difference between an ID appearing on its own and appearing mysteriously.
+function provisionKnownNote(item, autoRestore){
+  if(!Number.isInteger(item.known_id)) return '';
+  const id = String(item.known_id).padStart(2,'0');
+  const recovery = item.recovery || {};
+  if(recovery.status === 'conflict' || recovery.status === 'failed'){
+    return `<div class="provision-known warn">Was module ${id} — ${escapeProvision(recovery.message || 'could not be restored')}</div>`;
+  }
+  return autoRestore
+    ? `<div class="provision-known">Known module ${id} — restoring it automatically</div>`
+    : `<div class="provision-known warn">Last seen as module ${id} — automatic restore is off</div>`;
+}
+
+function renderUnprovisionedModules(items, modules, firstSuggestedId, autoRestore=true){
   const list = document.getElementById('unprovisionedModules');
   if(!list) return;
 
@@ -2413,16 +2434,24 @@ function renderUnprovisionedModules(items, modules, firstSuggestedId){
 
   const typed = collectTypedIds(list);
   const used = new Set((modules || []).map(module=>Number(module.id)));
+  // An ID we are holding for a module that lost it is not free to suggest.
+  items.forEach(item=>{ if(Number.isInteger(item.known_id)) used.add(item.known_id); });
   let nextId = Number.isInteger(firstSuggestedId) ? firstSuggestedId : 0;
   list.innerHTML = items.map(item=>{
-    while(nextId <= 254 && used.has(nextId)) nextId++;
-    const suggested = nextId <= 254 ? nextId : '';
-    if(suggested !== ''){ used.add(suggested); nextId++; }
+    let suggested;
+    if(Number.isInteger(item.known_id)){
+      suggested = item.known_id;
+    } else {
+      while(nextId <= 254 && used.has(nextId)) nextId++;
+      suggested = nextId <= 254 ? nextId : '';
+      if(suggested !== ''){ used.add(suggested); nextId++; }
+    }
     const serial = escapeProvision(item.serial);
     return `<div class="provision-unassigned">
       <div>
         <div class="provision-serial">${serial}</div>
         <div style="color:#786a50;font-size:.68rem;margin-top:2px">advertised ${item.age_seconds || 0}s ago</div>
+        ${provisionKnownNote(item, autoRestore)}
       </div>
       <button class="btn btn-secondary btn-sm" onclick="identifyUniversalModule('${serial}')" title="Home this module so you can locate it">
         <i data-lucide="locate-fixed" style="width:14px;height:14px"></i> Identify
@@ -2448,6 +2477,10 @@ function renderUniversalModules(modules){
     const firmware = escapeProvision(module.firmware || '');
     const firmwareLabel = firmware ? `v${firmware.replace(/^v/i,'')}` : 'detecting';
     const serial = escapeProvision(module.serial || 'serial pending');
+    const restored = Number(module.recoveries || 0);
+    const restoredBadge = restored
+      ? `<span class="provision-restored" title="This module lost its ID and had it restored ${restored} time${restored===1?'':'s'}. Repeated restores mean its EEPROM is failing.">restored ${restored}&times;</span>`
+      : '';
     const diagnosticButton = Number(module.firmware_number || 0) >= 26
       ? `<button class="btn btn-secondary btn-sm" onclick="openUniversalDiagnostics(${id})" title="Run Universal Firmware health tests">
            <i data-lucide="stethoscope" style="width:13px;height:13px"></i> Diagnose
@@ -2456,7 +2489,7 @@ function renderUniversalModules(modules){
     return `<article class="provision-module${module.online===false?' offline':''}">
       <div class="provision-module-top">
         <div class="provision-module-id">Module <strong>${id.toString().padStart(2,'0')}</strong></div>
-        <span class="provision-fw">${firmwareLabel}</span>
+        <span style="display:flex;gap:5px;align-items:center;flex-wrap:wrap">${restoredBadge}<span class="provision-fw">${firmwareLabel}</span></span>
       </div>
       <div class="provision-module-sn">${serial}</div>
       <div class="provision-module-actions">
@@ -2948,6 +2981,18 @@ function updateTransitionSpeedDefault(style){
   if(speedEl) speedEl.value = style === 'slot' ? 80 : style === 'sync' ? 0 : 15;
   if(speedWrap) speedWrap.style.display = isSyncStyle ? 'none' : '';
   if(composeSpeedWrap) composeSpeedWrap.style.display = isSyncStyle ? 'none' : '';
+}
+
+function toggleAutoReprovision(){
+  const enabled = document.getElementById('autoReprovisionToggle').checked;
+  universalRequest('/settings', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({action:'save_global', auto_reprovision:enabled}),
+  }).then(()=>{
+    showToast(enabled ? 'Modules that lose their ID will be restored'
+                      : 'Modules that lose their ID will wait to be assigned');
+    refreshUniversalProvisioning();
+  }).catch(e=>showToast(`Could not save: ${e.message}`, 'error'));
 }
 
 function toggleAutoHome(){

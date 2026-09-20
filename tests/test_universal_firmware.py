@@ -15,6 +15,7 @@ from hardware.universal_firmware import (  # noqa: E402
 
 
 SERIAL_NUMBER = "A3F24C0018E7D29B3F01"
+OTHER_SERIAL = "B10055FFA3C2918D7E44"
 
 
 class FakeSerial:
@@ -56,6 +57,52 @@ class FakeSerial:
     def reset_input_buffer(self):
         with self._lock:
             self._rx.clear()
+
+
+class FakeRegistry:
+    """The pairings the manager asks about, without settings.json."""
+
+    def __init__(self, pairings=None, enabled=True):
+        self.pairings = dict(pairings or {})
+        self._enabled = enabled
+        self.recovered = []
+        self.forgotten = []
+        self.counts = {}
+
+    def enabled(self):
+        return self._enabled
+
+    def known_id(self, serial):
+        return self.pairings.get(serial)
+
+    def recoveries(self, serial):
+        return self.counts.get(serial, 0)
+
+    def remember(self, serial, module_id, firmware=None):
+        changed = self.pairings.get(serial) != module_id
+        for other, held in list(self.pairings.items()):
+            if other != serial and held == module_id:
+                self.pairings.pop(other)
+        self.pairings[serial] = module_id
+        return changed
+
+    def forget(self, serial=None, module_id=None):
+        dropped = [s for s, held in list(self.pairings.items())
+                   if s == serial or (module_id is not None and held == module_id)]
+        for s in dropped:
+            self.pairings.pop(s, None)
+        self.forgotten += dropped
+        return dropped
+
+    def forget_all(self):
+        dropped = sorted(self.pairings)
+        self.pairings.clear()
+        self.forgotten += dropped
+        return dropped
+
+    def on_recovered(self, serial, module_id):
+        self.recovered.append((serial, module_id))
+        self.counts[serial] = self.counts.get(serial, 0) + 1
 
 
 class ProtocolParserTests(unittest.TestCase):
@@ -244,6 +291,252 @@ class ManagerCommandTests(unittest.TestCase):
         self.assertEqual(status["unprovisioned"], [])
         with self.manager._condition:
             self.assertIn(SERIAL_NUMBER, self.manager._unprovisioned)
+
+
+
+class IdentityRecoveryTests(unittest.TestCase):
+    """A module that loses its ID must get it back without anyone noticing.
+
+    EEPROM on this hardware forgets. The ID lives there with the calibration,
+    and a module that drops it stops answering to its address and starts
+    advertising — leaving its place in the display blank until someone opens
+    the calibration page and assigns it again by hand. The chip serial is the
+    one thing it cannot forget, so that is what the pairing hangs off.
+    """
+
+    def setUp(self):
+        self.serial = FakeSerial()
+        self.registry = FakeRegistry({SERIAL_NUMBER: 7})
+        self.manager = self.build()
+
+    def build(self, registry=None):
+        manager = UniversalFirmwareManager(
+            get_serial=lambda: self.serial,
+            serial_lock=threading.Lock(),
+            get_sim_mode=lambda: False,
+            registry=registry if registry is not None else self.registry,
+        )
+        # The real timeouts are seconds of waiting on a module that will never
+        # answer, which is time the suite should not spend.
+        manager.RECOVERY_PROBE_SECONDS = 0.05
+        manager.RECOVERY_ACK_TIMEOUT = 0.05
+        return manager
+
+    def tearDown(self):
+        self.manager.stop()
+
+    def answer(self, holder=None, ack=True, module_id=7):
+        """Serve the two transactions a recovery makes.
+
+        ``holder`` is the serial already answering to the ID, if any. Without
+        one the probe goes unanswered, which is what a vacant ID looks like.
+        """
+        probe = "m{}v\n".format(module_id).encode("ascii")
+
+        def respond(payload, serial_port):
+            if payload == probe and holder:
+                serial_port.queue_read(
+                    "m{}v:29:{}:{}\n".format(module_id, module_id, holder))
+            elif payload.startswith(b"mXI") and ack:
+                serial_port.queue_read(
+                    "mXack{}:{}\n".format(payload[3:23].decode(), module_id))
+        self.serial.write_hook = respond
+
+    def advertise(self, serial=SERIAL_NUMBER):
+        self.manager.handle_line("mXadv:" + serial)
+
+    def commands(self):
+        return [payload.decode("ascii").strip() for payload in self.serial.writes]
+
+    def test_a_module_that_forgot_its_id_is_given_it_back(self):
+        self.answer()
+        self.advertise()
+
+        result, = self.manager.recover_pending()
+
+        self.assertEqual(result["status"], "recovered")
+        self.assertEqual(result["id"], 7)
+        # Ask who holds the ID, assign it, then read the version back.
+        self.assertEqual(self.commands(), ["m7v", "mXI" + SERIAL_NUMBER + ":7", "m7v"])
+        self.assertEqual(self.registry.recovered, [(SERIAL_NUMBER, 7)])
+
+        status = self.manager.status()
+        self.assertEqual(status["unprovisioned"], [])
+        self.assertEqual(status["modules"][0]["id"], 7)
+
+    def test_a_module_nobody_has_seen_before_is_left_for_a_person(self):
+        self.answer()
+        self.advertise(OTHER_SERIAL)
+
+        self.assertEqual(self.manager.recover_pending(), [])
+        self.assertEqual(self.commands(), [])
+        self.assertIsNone(self.manager.status()["unprovisioned"][0]["known_id"])
+
+    def test_an_id_another_module_answers_to_is_not_taken_from_it(self):
+        # Two modules on one ID is the failure this path could introduce, so
+        # the bus is asked who holds it rather than the inventory.
+        self.answer(holder=OTHER_SERIAL)
+        self.advertise()
+
+        result, = self.manager.recover_pending()
+
+        self.assertEqual(result["status"], "conflict")
+        self.assertIn(OTHER_SERIAL, result["message"])
+        self.assertEqual(self.commands(), ["m7v"])
+        self.assertEqual(self.registry.recovered, [])
+
+    def test_the_module_actually_holding_the_id_corrects_the_pairing(self):
+        # The probe's answer goes through the parser like any other line, so
+        # learning who really holds the ID fixes what we believe — and the
+        # module that was wrongly claiming it stops being a candidate at all.
+        self.answer(holder=OTHER_SERIAL)
+        self.advertise()
+        self.manager.recover_pending()
+
+        self.assertEqual(self.registry.pairings, {OTHER_SERIAL: 7})
+        self.assertIsNone(self.registry.known_id(SERIAL_NUMBER))
+
+    def test_a_module_on_the_original_firmware_still_counts_as_holding_it(self):
+        # It answers without a serial. "Something is there but I cannot say
+        # what" is not permission to give the ID to someone else.
+        def respond(payload, serial_port):
+            if payload == b"m7v\n":
+                serial_port.queue_read("m7v:12\n")
+        self.serial.write_hook = respond
+        self.advertise()
+
+        result, = self.manager.recover_pending()
+
+        self.assertEqual(result["status"], "conflict")
+        self.assertEqual(self.registry.recovered, [])
+
+    def test_a_stale_inventory_entry_does_not_block_a_vacant_id(self):
+        # Modules say nothing unless asked, so an entry outlives the module it
+        # describes. If nobody answers the probe, the ID is free.
+        self.manager.handle_line("m7v:29:7:" + OTHER_SERIAL)
+        self.registry.pairings[SERIAL_NUMBER] = 7
+        self.answer()
+        self.advertise()
+
+        result, = self.manager.recover_pending()
+
+        self.assertEqual(result["status"], "recovered")
+        self.assertEqual(self.manager.status()["modules"][0]["serial"], SERIAL_NUMBER)
+
+    def test_a_module_that_will_not_take_its_id_back_is_not_retried_forever(self):
+        # Bad EEPROM can fail the write as easily as it failed to hold the
+        # value. Retrying every advertisement would mean a write every 15
+        # seconds for as long as the module stays plugged in.
+        self.answer(ack=False)
+        self.advertise()
+
+        for _ in range(self.manager.RECOVERY_MAX_ATTEMPTS + 2):
+            self.manager.recover_pending()
+            with self.manager._condition:
+                record = self.manager._recovery.get(SERIAL_NUMBER)
+                if record:      # skip the backoff, not the attempt limit
+                    record["last_attempt_at"] -= self.manager.RECOVERY_RETRY_SECONDS
+
+        record = self.manager._recovery[SERIAL_NUMBER]
+        self.assertEqual(record["attempts"], self.manager.RECOVERY_MAX_ATTEMPTS)
+        self.assertEqual(record["status"], "unconfirmed")
+
+    def test_a_failed_attempt_is_not_repeated_immediately(self):
+        self.answer(ack=False)
+        self.advertise()
+        self.manager.recover_pending()
+        before = len(self.serial.writes)
+
+        self.assertEqual(self.manager.recover_pending(), [])
+        self.assertEqual(len(self.serial.writes), before)
+
+    def test_a_successful_recovery_spends_none_of_the_retry_budget(self):
+        # A module that forgets again next year should not find the budget
+        # from this year's incident already spent.
+        self.answer()
+        self.advertise()
+        self.manager.recover_pending()
+
+        self.assertEqual(self.manager._recovery[SERIAL_NUMBER]["attempts"], 0)
+
+    def test_de_provisioning_a_module_forgets_it(self):
+        # Erasing an ID is deliberate. Handing it straight back would make a
+        # module impossible to reassign.
+        self.manager.deprovision(7)
+
+        self.assertEqual(self.registry.forgotten, [SERIAL_NUMBER])
+        self.advertise()
+        self.assertEqual(self.manager.recover_pending(), [])
+
+    def test_de_provisioning_everything_forgets_everything(self):
+        self.registry.pairings[OTHER_SERIAL] = 8
+        self.manager.deprovision_all()
+
+        self.assertEqual(self.registry.pairings, {})
+
+    def test_recovery_can_be_switched_off(self):
+        self.registry._enabled = False
+        self.answer()
+        self.advertise()
+
+        self.assertEqual(self.manager.recover_pending(), [])
+        self.assertEqual(self.commands(), [])
+        self.assertFalse(self.manager.status()["auto_reprovision"])
+
+    def test_nothing_is_attempted_without_a_bus_to_attempt_it_on(self):
+        # A failure that only means "no hardware" must not spend an attempt.
+        manager = UniversalFirmwareManager(
+            get_serial=lambda: None,
+            serial_lock=threading.Lock(),
+            get_sim_mode=lambda: False,
+            registry=self.registry,
+        )
+        manager.handle_line("mXadv:" + SERIAL_NUMBER)
+
+        self.assertEqual(manager.recover_pending(), [])
+        self.assertEqual(manager._recovery, {})
+
+    def test_bus_traffic_records_which_chip_answers_to_which_id(self):
+        self.manager.handle_line("m4v:29:4:" + OTHER_SERIAL)
+        self.manager.handle_line("mXack" + SERIAL_NUMBER + ":9")
+
+        self.assertEqual(self.registry.pairings[OTHER_SERIAL], 4)
+        self.assertEqual(self.registry.pairings[SERIAL_NUMBER], 9)
+
+    def test_status_says_which_module_an_advertisement_belongs_to(self):
+        self.advertise()
+        self.advertise(OTHER_SERIAL)
+
+        status = self.manager.status(module_limit=45)
+        known = {item["serial"]: item["known_id"] for item in status["unprovisioned"]}
+
+        self.assertEqual(known, {SERIAL_NUMBER: 7, OTHER_SERIAL: None})
+        # 7 is spoken for, so it is not offered for the module that is not.
+        self.assertNotEqual(status["suggested_id"], 7)
+        self.assertTrue(status["auto_reprovision"])
+
+    def test_status_counts_how_often_a_module_has_needed_this(self):
+        # A module that keeps needing this has failing EEPROM, and the count
+        # is what tells its owner to replace it.
+        self.answer()
+        self.advertise()
+        self.manager.recover_pending()
+
+        module, = self.manager.status()["modules"]
+        self.assertEqual(module["recoveries"], 1)
+
+    def test_a_broken_registry_cannot_take_the_bus_down(self):
+        class Exploding:
+            def __getattr__(self, name):
+                def boom(*args, **kwargs):
+                    raise RuntimeError("settings.json is unreadable")
+                return boom
+
+        manager = self.build(registry=Exploding())
+        with self.assertLogs(level="ERROR"):
+            manager.handle_line("mXack" + SERIAL_NUMBER + ":7")
+        self.assertEqual(manager.status()["modules"][0]["id"], 7)
+        manager.stop()
 
 
 if __name__ == "__main__":
