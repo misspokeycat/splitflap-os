@@ -20,7 +20,8 @@ const CC_MOTION_MAX_W   = 480;   // frame width used for settle detection
 const CC_MOTION_W       = 12;    // per-cell crop for settle detection
 const CC_MOTION_H       = 18;
 const CC_OCR_W          = 96;    // per-cell crop handed to OCR
-const CC_OCR_H          = 144;
+const CC_OCR_H          = 144;   // only a fallback; the real height comes from the grid
+const CC_OCR_H_MAX      = 400;
 const CC_FRAME_MS       = 90;    // settle sampling interval
 const CC_STABLE_FRAMES  = 4;     // consecutive quiet frames before we believe it
 const CC_SETTLE_TIMEOUT = 20000;
@@ -64,6 +65,8 @@ const cc = {
   running:     false,
   drag:        null,   // index of the corner handle being dragged
   previewId:   null,
+  ocrW:        CC_OCR_W,
+  ocrH:        CC_OCR_H,
   frameCanvas: null,
   workCanvas:  null,
   dump:        null,   // {session, manifest} while a run is being recorded
@@ -102,7 +105,6 @@ function ccDumpStart(){
     manifest: {
       created:   now.toISOString(),
       grid:      { rows: cc.rows, cols: cc.cols, count: cc.count },
-      cell:      { w: CC_OCR_W, h: CC_OCR_H, inset: CC_CELL_INSET },
       motion:    { w: CC_MOTION_W, h: CC_MOTION_H, frameWidth: CC_MOTION_MAX_W },
       charMap:   getCharMap(0),
       positions: [],
@@ -141,6 +143,7 @@ function ccDumpAdd(name, bytes){
 // Finish the manifest and hand the whole session over as one file.
 function ccDumpFinish(){
   if(!cc.dump || !cc.dump.files.length) return;
+  cc.dump.manifest.cell       = { w: cc.ocrW, h: cc.ocrH, inset: CC_CELL_INSET };
   cc.dump.manifest.corners    = cc.corners;
   cc.dump.manifest.homography = cc.H;
   cc.dump.manifest.threshold  = cc.threshold;
@@ -408,6 +411,7 @@ function ccDefaultCorners(){
   const mx = w * 0.08, my = h * 0.30;
   cc.corners = [{x:mx, y:my}, {x:w-mx, y:my}, {x:w-mx, y:h-my}, {x:mx, y:h-my}];
   cc.H = ccSolveH(CC_UNIT, cc.corners);
+  ccSetCellSize();
   ccRenderHandles();
 }
 
@@ -452,6 +456,7 @@ function ccHandleMove(ev){
     y: Math.max(0, Math.min(v.videoHeight, y)),
   };
   cc.H = ccSolveH(CC_UNIT, cc.corners);
+  ccSetCellSize();
   ccRenderHandles();
 }
 
@@ -572,6 +577,7 @@ async function ccAutoRegister(){
 
   cc.H = H;
   cc.corners = CC_UNIT.map(u => ccApplyH(H, u.x, u.y));
+  ccSetCellSize();
   ccRenderHandles();
   ccRegHint('Grid found from the four corner modules. Check the cells line up, and drag ' +
             'any corner to adjust.');
@@ -706,6 +712,25 @@ function ccCellQuad(modId, H){
   const v0 = (row + i) / cc.rows, v1 = (row + 1 - i) / cc.rows;
   return [ccApplyH(H, u0, v0), ccApplyH(H, u1, v0),
           ccApplyH(H, u1, v1), ccApplyH(H, u0, v1)];
+}
+
+// A module window is far taller than it is wide — about 2.5:1 on a 3x15
+// display. Warping it into a squarer buffer squashes the glyph to 60% of its
+// height and throws away half the vertical detail, and OCR reads the result
+// noticeably worse. Take the shape from the grid rather than assuming one.
+function ccCellAspect(){
+  if(!cc.H || cc.corners.length !== 4) return CC_OCR_H / CC_OCR_W;
+  const quad = ccCellQuad(Math.floor(cc.count / 2));
+  const d = (a, b) => Math.hypot(b.x - a.x, b.y - a.y);
+  const w = (d(quad[0], quad[1]) + d(quad[3], quad[2])) / 2;
+  const h = (d(quad[0], quad[3]) + d(quad[1], quad[2])) / 2;
+  return (w > 0 && h > 0) ? h / w : CC_OCR_H / CC_OCR_W;
+}
+
+function ccSetCellSize(){
+  cc.ocrW = CC_OCR_W;
+  cc.ocrH = Math.max(CC_OCR_W,
+                     Math.min(CC_OCR_H_MAX, Math.round(CC_OCR_W * ccCellAspect())));
 }
 
 // ── Live preview ───────────────────────────────────────────
@@ -951,6 +976,95 @@ function ccCellToCanvas(cell){
   return c;
 }
 
+// ── The flap seam ──────────────────────────────────────────
+
+// A character on a split-flap is printed across two half-cards, and where
+// they meet there is a line all the way across the glyph. To OCR that line is
+// a stroke the letter does not have, and it is why P, R, Q, 9 and 5 came back
+// unread from a real sweep while S and X read perfectly: S already has a
+// stroke at its waist, P does not.
+//
+// Measured on a 3x15 display at 96x144 per cell, bridging the seam took those
+// characters from 24% correct to 53%.
+
+const CC_SEAM_BAND   = 0.06;   // how far from the middle to look, as a fraction of height
+const CC_SEAM_FIND   = 0.85;   // coverage across the glyph that marks the seam
+const CC_SEAM_GROW   = 0.70;   // coverage that still counts as part of it
+const CC_SEAM_BRIGHT = 140;
+const CC_SEAM_ON     = 110;
+const CC_SEAM_MAX    = 0.25;   // thicker than this is not a seam, it is the glyph
+
+// The rows the seam occupies, or null if there is no line across this cell.
+//
+// Only a narrow band at the middle is considered. The two half-cards are
+// equal, so that is where the join has to be — and searching wider finds the
+// top bar of a P instead, which is solid across the glyph and looks identical
+// to a seam.
+function ccSeamRows(g, w, h){
+  let lo = w, hi = -1;
+  for(let x = 0; x < w; x++){
+    for(let y = 0; y < h; y++){
+      if(g[y * w + x] > CC_SEAM_BRIGHT){
+        if(x < lo) lo = x;
+        if(x > hi) hi = x;
+        break;
+      }
+    }
+  }
+  if(hi < lo) return null;                      // nothing bright: a blank flap
+
+  const span = hi - lo + 1;
+  const cover = y => {
+    let n = 0;
+    for(let x = lo; x <= hi; x++) if(g[y * w + x] > CC_SEAM_ON) n++;
+    return n / span;
+  };
+
+  const mid = h >> 1, reach = Math.round(h * CC_SEAM_BAND);
+  let best = -1, bestCover = CC_SEAM_FIND;
+  for(let y = Math.max(0, mid - reach); y <= Math.min(h - 1, mid + reach); y++){
+    const c = cover(y);
+    if(c > bestCover){ bestCover = c; best = y; }
+  }
+  if(best < 0) return null;
+
+  let top = best, bot = best;
+  while(top > 0 && cover(top - 1) > CC_SEAM_GROW) top--;
+  while(bot < h - 1 && cover(bot + 1) > CC_SEAM_GROW) bot++;
+
+  // A narrow glyph — an I, a 1 — is full-coverage down its whole length, and
+  // bridging that erases the character. A real seam is a thin line.
+  if(bot - top + 1 > h * CC_SEAM_MAX) return null;
+  return { top: top, bot: bot };
+}
+
+// Interpolate down each column across the seam. A stroke that genuinely
+// crosses it — the stem of a P, the curve of an S — is bright on both sides
+// and comes through; the seam itself is not, and goes.
+function ccBridgeSeam(cell){
+  const w = cell.width, h = cell.height;
+  const g = ccGrayOf(cell);
+  const seam = ccSeamRows(g, w, h);
+  if(seam){
+    const a = Math.max(0, seam.top - 1), b = Math.min(h - 1, seam.bot + 1);
+    if(b > a){
+      for(let x = 0; x < w; x++){
+        const above = g[a * w + x], below = g[b * w + x];
+        for(let y = seam.top; y <= seam.bot; y++){
+          const t = (y - a) / (b - a);
+          g[y * w + x] = Math.round(above * (1 - t) + below * t);
+        }
+      }
+    }
+  }
+  const out = new ImageData(w, h);
+  for(let i = 0; i < g.length; i++){
+    out.data[i*4] = out.data[i*4+1] = out.data[i*4+2] = g[i];
+    out.data[i*4+3] = 255;
+  }
+  return out;
+}
+
 // Run every module's crop through the pool, keeping all workers busy.
 async function ccRecognizeAll(cells){
   const out = new Array(cells.length).fill(null);
@@ -1125,7 +1239,7 @@ async function ccSweepPass(){
     }
 
     note.textContent = 'Reading…';
-    const cells = ccGrabCells(CC_OCR_W, CC_OCR_H);
+    const cells = ccGrabCells(cc.ocrW, cc.ocrH);
     const reads = await ccRecognizeAll(cells);
     const res   = await fetch('/tuning_status?char_index=' + idx);
     const data  = await res.json();

@@ -8,3 +8,4 @@ CLAUDE.md
 venv/
 .venv/
 .pytest_cache/
+tests/*.zip

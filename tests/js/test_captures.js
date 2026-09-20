@@ -32,9 +32,13 @@ const cc = { count: 45, cols: 15, rows: 3 };
 const api = new Function(
   'cc', 'CC_CELL_INSET',
   ['ccSolveH', 'ccGauss', 'ccApplyH', 'ccScaleH', 'ccCellQuad', 'ccOtsu', 'ccFindBlobs',
-   'ccCornerModules', 'ccCornerCentres'].map(grab).join('\n') +
+   'ccCornerModules', 'ccCornerCentres', 'ccSeamRows', 'ccCellAspect'].map(grab).join('\n') +
+  // Taken from the source rather than copied here, so retuning the seam
+  // detector is tested at its new values instead of silently drifting away
+  // from what this file asserts.
+  '\n' + (src.match(/^const CC_(?:SEAM|OCR)_[A-Z]+\s*=\s*[0-9.]+;/gm) || []).join('\n') +
   '; return {ccSolveH, ccApplyH, ccScaleH, ccCellQuad, ccOtsu, ccFindBlobs,' +
-  ' ccCornerModules, ccCornerCentres};'
+  ' ccCornerModules, ccCornerCentres, ccSeamRows, ccCellAspect};'
 )(cc, 0.14);
 
 let failures = 0;
@@ -150,22 +154,21 @@ if (!sessions.length) {
       }
     }
 
-    // Every crop the manifest names must exist and be the size it claims —
-    // a fixture that has lost its images fails loudly rather than silently
-    // testing nothing.
-    let missing = 0, wrongSize = 0, checked = 0;
+    // A fixture ships the readings in full but only a few of the crops —
+    // 45 per position at 27 KB each is not something to put in a repo. Each
+    // one it does name must be there and be the size it claims.
+    let missing = 0, wrongSize = 0, named = 0;
     for (const pos of manifest.positions || []) {
       for (const mod of pos.modules) {
+        if (!mod.file) continue;
+        named++;
         const file = path.join(dir, mod.file);
         if (!fs.existsSync(file)) { missing++; continue; }
-        if (checked < 12) {
-          const img = decodePng(fs.readFileSync(file));
-          if (img.width !== manifest.cell.w || img.height !== manifest.cell.h) wrongSize++;
-          checked++;
-        }
+        const img = decodePng(fs.readFileSync(file));
+        if (img.width !== manifest.cell.w || img.height !== manifest.cell.h) wrongSize++;
       }
     }
-    check('    every named crop is present', missing, 0);
+    check(`    all ${named} named crops are present`, missing, 0);
     check('    crops are the size the manifest claims', wrongSize, 0);
 
     // What the run decided, recomputed from what it recorded. This is the
@@ -173,7 +176,7 @@ if (!sessions.length) {
     let mismatched = 0, scored = 0;
     for (const pos of manifest.positions || []) {
       for (const mod of pos.modules) {
-        if (mod.err === null || mod.from === null || !mod.cal || !mod.flaps) continue;
+        if (mod.err === undefined || mod.from === undefined || !mod.cal || !mod.flaps) continue;
         scored++;
         const expect = Math.max(0, Math.min(mod.cal - 1,
           Math.round(mod.from - mod.err * (mod.cal / mod.flaps))));
@@ -187,7 +190,7 @@ if (!sessions.length) {
     const perModule = {};
     for (const pos of manifest.positions || []) {
       for (const mod of pos.modules) {
-        if (mod.err === null) continue;
+        if (mod.err === undefined) continue;
         (perModule[mod.id] = perModule[mod.id] || []).push(mod.err);
       }
     }
@@ -198,6 +201,76 @@ if (!sessions.length) {
                   `(${systemic.map(id => perModule[id][0]).join(', ')} flaps) — a home offset`);
     }
   }
+}
+
+// ── Finding the flap seam ──────────────────────────────────
+
+// A character is printed across two half-cards and the join shows as a line
+// all the way across the glyph. To OCR that is a stroke the letter does not
+// have, which is why P, R, Q and 9 came back unread from a real sweep while
+// S and X read perfectly.
+function synthetic(w, h, opts) {
+  const g = new Uint8Array(w * h);
+  // A bar down the middle, so there is something bright to bound the glyph.
+  for (let y = Math.round(h * 0.2); y < Math.round(h * 0.8); y++)
+    for (let x = Math.round(w * 0.3); x < Math.round(w * 0.45); x++) g[y * w + x] = 230;
+  if (opts && opts.seam) {
+    for (let y = opts.seam[0]; y <= opts.seam[1]; y++)
+      for (let x = Math.round(w * 0.3); x < Math.round(w * 0.9); x++) g[y * w + x] = 210;
+  }
+  return g;
+}
+
+const SW = 96, SH = 240;
+const withSeam = api.ccSeamRows(synthetic(SW, SH, { seam: [116, 126] }), SW, SH);
+check('a seam across the glyph is found', !!withSeam, true);
+if (withSeam) {
+  check('seam top', withSeam.top, 116);
+  check('seam bottom', withSeam.bot, 126);
+}
+check('a glyph with no bar across it has no seam',
+      api.ccSeamRows(synthetic(SW, SH, null), SW, SH), null);
+check('a blank cell has no seam',
+      api.ccSeamRows(new Uint8Array(SW * SH), SW, SH), null);
+
+// Only near the middle: a letter's own crossbar elsewhere is not a seam.
+check('a bar away from the middle is left alone',
+      api.ccSeamRows(synthetic(SW, SH, { seam: [56, 62] }), SW, SH), null);
+
+// ── The real capture ───────────────────────────────────────
+
+if (sessions.length) {
+  const dir = path.join(FIXTURES, sessions[0]);
+  const manifest = JSON.parse(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8'));
+  cc.rows = manifest.grid.rows; cc.cols = manifest.grid.cols; cc.count = manifest.grid.count;
+  console.log(`\n  session ${sessions[0]}, camera path:`);
+
+  // The crop that came back empty from OCR has a seam straight through it.
+  const empty = path.join(dir, 'p1_i16_m00.png');       // expected "P", read nothing
+  if (fs.existsSync(empty)) {
+    const img = decodePng(fs.readFileSync(empty));
+    const seam = api.ccSeamRows(toGray(img), img.width, img.height);
+    check('    the unread P has a seam across it', !!seam, true);
+    if (seam) {
+      const mid = img.height / 2;
+      check('    and it sits near the middle of the card',
+            Math.abs((seam.top + seam.bot) / 2 - mid) < img.height * 0.18, true);
+    }
+  }
+
+  // A module window is much taller than it is wide. This capture was taken
+  // with a fixed 96x144 crop, so it is the evidence for the fix: the helper
+  // must derive a far taller buffer from the same grid.
+  cc.H = manifest.homography;
+  cc.corners = [[0,0],[1,0],[1,1],[0,1]].map(([u,v]) => api.ccApplyH(cc.H, u, v));
+  const aspect = api.ccCellAspect();
+  near('    module window aspect read from the grid', aspect, 2.52, 0.05);
+  const derived = Math.max(96, Math.min(400, Math.round(96 * aspect)));
+  check('    the derived crop is taller than the one this run used',
+        derived > manifest.cell.h, true);
+  console.log(`    (this capture used ${manifest.cell.w}x${manifest.cell.h}; ` +
+              `the grid says ${manifest.cell.w}x${derived})`);
+  cc.H = null;
 }
 
 console.log(failures ? `\n${failures} failure(s)` : '\nall checks passed');
